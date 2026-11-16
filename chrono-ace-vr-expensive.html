@@ -1,0 +1,2678 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chrono Ace VR</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#000;font-family:monospace}
+  #help{position:fixed;left:10px;top:10px;color:#fff;background:rgba(0,0,0,.5);padding:8px 12px;border-radius:6px;font-size:13px;line-height:1.5;pointer-events:none}
+</style>
+<script type="importmap">
+{"imports":{"three":"https://unpkg.com/three@0.160.0/build/three.module.js",
+"three/addons/":"https://unpkg.com/three@0.160.0/examples/jsm/"}}
+</script>
+</head>
+<body>
+<div id="help">
+<b>CHRONO ACE VR</b><br>
+VR: left stick = steer (push forward to dive) &middot; either trigger = fire where that hand points<br>
+Desktop: click to capture mouse &middot; mouse / WASD / arrows = steer &middot; click or Space = fire
+</div>
+<script type="module">
+
+import * as THREE from 'three';
+import { VRButton } from 'three/addons/webxr/VRButton.js';
+
+// ---------- Setup ----------
+const scene = new THREE.Scene();
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.xr.enabled = true;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.xr.setReferenceSpaceType('local');
+document.body.appendChild(renderer.domElement);
+document.body.appendChild(VRButton.createButton(renderer));
+
+const camera = new THREE.PerspectiveCamera(75, innerWidth / innerHeight, 0.05, 2000);
+const player = new THREE.Group();
+player.rotation.order = 'YXZ';
+scene.add(player);
+player.add(camera);
+
+const hemi = new THREE.HemisphereLight(0xffffff, 0x446688, 1.1);
+scene.add(hemi);
+const sun = new THREE.DirectionalLight(0xffffff, 2.2);
+// A low fill light from the opposite side. This is the cheap trick that makes
+// terrain relief visible: one light alone flattens anything facing it.
+const fill = new THREE.DirectionalLight(0xbcd4ff, 0.55);
+fill.position.set(-0.6, 0.25, 0.75);
+scene.add(fill);
+sun.position.set(50, 100, 30);
+scene.add(sun);
+scene.fog = new THREE.FogExp2(0xbfe3ff, 0.0011);   // exponential haze reads as real distance
+
+// Gradient sky dome with sun disc and glow
+const skyU = {
+  top: { value: new THREE.Color(0x2a6fd6) }, horizon: { value: new THREE.Color(0xbfe3ff) },
+  bottom: { value: new THREE.Color(0x2b5a7a) }, sunColor: { value: new THREE.Color(0xfff2cc) },
+  sunDir: { value: new THREE.Vector3(0.4, 0.35, -0.85).normalize() },
+};
+const sky = new THREE.Mesh(new THREE.SphereGeometry(1500, 48, 24), new THREE.ShaderMaterial({
+  uniforms: skyU, side: THREE.BackSide, depthWrite: false,
+  vertexShader: `varying vec3 vDir;
+void main(){ vDir = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+  fragmentShader: `uniform vec3 top; uniform vec3 horizon; uniform vec3 bottom; uniform vec3 sunColor; uniform vec3 sunDir;
+varying vec3 vDir;
+void main(){
+  vec3 d = normalize(vDir); float h = d.y;
+  // Sharper falloff: the sky darkens quickly away from the horizon and the ground
+  // drops to its own colour fast, so the boundary reads as a line rather than a blur.
+  vec3 c = h > 0.0 ? mix(horizon, top, pow(h, 0.32)) : mix(horizon, bottom, pow(-h, 0.16));
+  // A bright haze band hugging the horizon, fading out within a couple of degrees.
+  float band = exp(-abs(h) * 220.0);
+  // A hard dark edge just under the horizon: this is what makes it read as a horizon.
+  float edge = smoothstep(0.004, -0.012, h) * 0.55;
+  c = mix(c, c * 0.62, edge);
+  c += horizon * band * 0.9;
+  float s = max(dot(d, normalize(sunDir)), 0.0);
+  c += sunColor * (pow(s, 900.0) * 6.0 + pow(s, 40.0) * 0.5 + pow(s, 6.0) * 0.18);
+  gl_FragColor = vec4(c, 1.0);
+  #include <tonemapping_fragment>
+  #include <colorspace_fragment>
+}`,
+}));
+sky.frustumCulled = false; sky.renderOrder = -1;
+scene.add(sky);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ---------- Eras ----------
+const ERAS = [
+  { year: 1914, top: 0x3d7fd1, horizon: 0xdcefff, bottom: 0x3c5a34, sun: 0xfff3d6, sunDir: [0.4, 0.5, -0.8], cloud: 0xffffff, shade: 0xc9d3de, color: 0x9b7a48, speed: 20, shape: 'biplane' },
+  { year: 1944, top: 0x2f63b0, horizon: 0xbcd8f0, bottom: 0x16384d, sun: 0xfff0d0, sunDir: [-0.5, 0.4, -0.75], cloud: 0xffffff, shade: 0xb8c4d2, color: 0x56703f, speed: 26, shape: 'prop' },
+  { year: 1968, top: 0x1d4f9a, horizon: 0xaecbe8, bottom: 0x2a4630, sun: 0xffffff, sunDir: [0.2, 0.7, -0.6], cloud: 0xf4f8ff, shade: 0xaab6c4, color: 0xa8acb0, speed: 34, shape: 'jet' },
+  { year: 1991, top: 0x34296a, horizon: 0xff9c5c, bottom: 0x2a1d30, sun: 0xffb070, sunDir: [0.0, 0.08, -1.0], cloud: 0xffd2b0, shade: 0x8a6a80, color: 0x4a4a58, speed: 40, shape: 'jet' },
+  { year: 2077, top: 0x07021a, horizon: 0x7a2496, bottom: 0x06021a, sun: 0xff55cc, sunDir: [0.3, 0.15, -0.9], cloud: 0x9a7cff, shade: 0x3a2a70, color: 0x55ffcc, speed: 48, shape: 'saucer' },
+];
+let eraIndex = 0, loopCount = 0;
+const era = () => ERAS[eraIndex];
+const KILLS_FOR_BOSS = 20;
+
+// ---------- Audio engine ----------
+let actx = null, masterGain = null, comp = null, engine = null, noiseBuf = null, panNode = null, hum = { osc1: null, osc2: null, sub: null };
+function initAudio() {
+  if (!actx) {
+    actx = new (window.AudioContext || window.webkitAudioContext)();
+    comp = actx.createDynamicsCompressor();
+    comp.threshold.value = -18; comp.knee.value = 12; comp.ratio.value = 5;
+    masterGain = actx.createGain(); masterGain.gain.value = 0.85;
+    comp.connect(masterGain).connect(actx.destination);
+    const len = actx.sampleRate * 2;
+    noiseBuf = actx.createBuffer(1, len, actx.sampleRate);
+    const d = noiseBuf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+    startEngine();
+  }
+  if (actx.state === 'suspended') actx.resume();
+  realMusicBus();
+}
+renderer.xr.addEventListener('sessionstart', initAudio);
+
+// Listener follows the head, so sound comes from the right direction
+function updateListener() {
+  if (!actx) return;
+  const p = new THREE.Vector3(), q = new THREE.Quaternion(), up = new THREE.Vector3(0, 1, 0);
+  camera.getWorldPosition(p); camera.getWorldQuaternion(q);
+  const f = new THREE.Vector3(0, 0, -1).applyQuaternion(q);
+  const l = actx.listener;
+  if (l.positionX) {
+    const t = actx.currentTime;
+    l.positionX.setTargetAtTime(p.x, t, 0.02); l.positionY.setTargetAtTime(p.y, t, 0.02); l.positionZ.setTargetAtTime(p.z, t, 0.02);
+    l.forwardX.setTargetAtTime(f.x, t, 0.02); l.forwardY.setTargetAtTime(f.y, t, 0.02); l.forwardZ.setTargetAtTime(f.z, t, 0.02);
+    l.upX.setTargetAtTime(up.x, t, 0.02); l.upY.setTargetAtTime(up.y, t, 0.02); l.upZ.setTargetAtTime(up.z, t, 0.02);
+  } else { l.setPosition(p.x, p.y, p.z); l.setOrientation(f.x, f.y, f.z, up.x, up.y, up.z); }
+}
+function audioNow() { return actx ? actx.currentTime : 0; }
+
+function noiseSrc() {
+  const s = actx.createBufferSource();
+  s.buffer = noiseBuf; s.loop = true; return s;
+}
+function envGain(t, attack, hold, peak) {
+  const g = actx.createGain();
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.linearRampToValueAtTime(peak, t + attack);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + attack + hold);
+  return g;
+}
+function panner(pos) {
+  const p = actx.createPanner();
+  p.panningModel = 'HRTF'; p.distanceModel = 'inverse';
+  p.refDistance = 12; p.maxDistance = 600; p.rolloffFactor = 1.4;
+  const v = pos || new THREE.Vector3();
+  if (p.positionX) { p.positionX.value = v.x; p.positionY.value = v.y; p.positionZ.value = v.z; }
+  else p.setPosition(v.x, v.y, v.z);
+  return p;
+}
+
+// Waveform snapshots, built once and reused for every shot or explosion
+let waveCache = null;
+function cachedWave(pts) {
+  if (waveCache === null) waveCache = new Map();
+  const key = pts.join(',');
+  if (!waveCache.has(key)) {
+    const w = actx.createWaveShaper();
+    const n = 64, curve = new Float32Array(n);
+    for (let i = 0; i < n; i++) curve[i] = pts[i % pts.length];
+    w.curve = curve; w.oversample = '4x';
+    waveCache.set(key, w);
+  }
+  return waveCache.get(key);
+}
+
+// Twin cannons: a hard body thump plus a bright snapping crack, distance-mapped
+const SHOOT_WAVE = [0, 0.7, 1, 0.55, -0.4, -0.85, -0.25, 0.5, 0.2, -0.15];
+function sfxShoot(pos) {
+  if (!actx) return;
+  const t = actx.currentTime;
+  const p = panner(pos);
+  const o = actx.createOscillator(), g = envGain(t, 0.001, 0.09, 0.32);
+  o.frequency.setValueAtTime(340, t); o.frequency.exponentialRampToValueAtTime(70, t + 0.1);
+  if (o.setPeriodicWave) { try { o.setPeriodicWave(cachedWave(SHOOT_WAVE)); } catch (err) { o.type = 'triangle'; } }
+  else o.type = 'triangle';
+  o.connect(g).connect(p).connect(comp); o.start(t); o.stop(t + 0.12);
+  const n = noiseSrc(), bp = actx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 2400; bp.Q.value = 1.4;
+  const ng = envGain(t, 0.001, 0.07, 0.26);
+  n.connect(bp).connect(ng).connect(p).connect(comp); n.start(t); n.stop(t + 0.09);
+  // cockpit rattle and a short slap of reverb-ish tail
+  const r = actx.createOscillator(), rg = envGain(t, 0.002, 0.16, 0.07);
+  r.type = 'square'; r.frequency.setValueAtTime(96, t); r.frequency.linearRampToValueAtTime(58, t + 0.15);
+  r.connect(rg).connect(comp); r.start(t); r.stop(t + 0.18);
+  const tail = noiseSrc(), tf = actx.createBiquadFilter(); tf.type = 'bandpass'; tf.frequency.value = 1100; tf.Q.value = 0.7;
+  const tg = envGain(t + 0.03, 0.02, 0.3, 0.09);
+  tail.connect(tf).connect(tg).connect(p).connect(comp); tail.start(t + 0.03); tail.stop(t + 0.4);
+}
+
+// Explosion: body of filtered noise, a sub-bass punch, and debris tail
+function sfxBoom(pos, size) {
+  if (!actx) return;
+  const t = actx.currentTime, big = size > 2;  const p = panner(pos);
+  const n = noiseSrc(), lp = actx.createBiquadFilter(); lp.type = 'lowpass';
+  lp.frequency.setValueAtTime(3800, t); lp.frequency.exponentialRampToValueAtTime(big ? 120 : 320, t + (big ? 1.3 : 0.45));
+  const ng = envGain(t, 0.004, big ? 1.3 : 0.42, big ? 1.0 : 0.55);
+  n.connect(lp).connect(ng).connect(p).connect(comp); n.start(t); n.stop(t + (big ? 1.5 : 0.55));
+  const o = actx.createOscillator(), og = envGain(t, 0.003, big ? 0.7 : 0.28, big ? 0.9 : 0.6);
+  o.type = 'sine'; o.frequency.setValueAtTime(big ? 90 : 130, t);
+  o.frequency.exponentialRampToValueAtTime(big ? 26 : 55, t + (big ? 0.75 : 0.3));
+  o.connect(og).connect(p).connect(comp); o.start(t); o.stop(t + (big ? 0.85 : 0.35));
+  // debris crackle
+  const c = noiseSrc(), hp = actx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 1800;
+  const cg = envGain(t + 0.03, 0.02, big ? 1.1 : 0.35, big ? 0.22 : 0.16);
+  c.connect(hp).connect(cg).connect(p).connect(comp); c.start(t + 0.03); c.stop(t + (big ? 1.3 : 0.45));
+  if (big) { const tail = noiseSrc(), tg = envGain(t + 0.35, 0.4, 2.2, 0.3);
+    const tf = actx.createBiquadFilter(); tf.type = 'lowpass'; tf.frequency.value = 500;
+    tail.connect(tf).connect(tg).connect(p).connect(comp); tail.start(t + 0.35); tail.stop(t + 2.9); }
+}
+
+// Radar ping: a short bright blip with a gentle tail
+function sfxBeep(freq, dur, vol, type) {
+  if (!actx) return;
+  const t = actx.currentTime, o = actx.createOscillator(), g = envGain(t, 0.004, dur, vol);
+  o.type = type || 'square'; o.frequency.setValueAtTime(freq, t);
+  o.frequency.exponentialRampToValueAtTime(freq * 0.75, t + dur);
+  const sh = actx.createWaveShaper(), curve = new Float32Array(64);
+  for (let i = 0; i < 64; i++) curve[i] = Math.tanh((i / 32 - 1) * 2);
+  sh.curve = curve;
+  o.connect(sh).connect(g).connect(comp); o.start(t); o.stop(t + dur + 0.12);
+}
+
+// Taking a hit: metal clang over a low thud, plus a brief ringing shell
+function sfxDamage() {
+  if (!actx) return;
+  const t = actx.currentTime;
+  const o = actx.createOscillator(), g = envGain(t, 0.002, 0.28, 0.45);
+  o.type = 'sine'; o.frequency.setValueAtTime(150, t); o.frequency.exponentialRampToValueAtTime(48, t + 0.3);
+  o.connect(g).connect(comp); o.start(t); o.stop(t + 0.35);
+  const n = noiseSrc(), bp = actx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 1800; bp.Q.value = 0.6;
+  const ng = envGain(t, 0.001, 0.2, 0.5);
+  n.connect(bp).connect(ng).connect(comp); n.start(t); n.stop(t + 0.25);
+  [820, 1240, 1880].forEach((f, i) => {
+    const r = actx.createOscillator(), rg = envGain(t + 0.01, 0.01, 1.1 - i * 0.25, 0.12 / (i + 1));
+    r.type = 'triangle'; r.frequency.setValueAtTime(f, t + 0.01);
+    r.connect(rg).connect(comp); r.start(t + 0.01); r.stop(t + 1.2);
+  });
+}
+// Warning buzzer
+function sfxAlarm(times, from, to) {
+  if (!actx) return;
+  const t0 = actx.currentTime;
+  for (let i = 0; i < (times || 3); i++) {
+    const t = t0 + i * 0.24, o = actx.createOscillator(), g = envGain(t, 0.01, 0.2, 0.22);
+    o.type = 'sawtooth'; o.frequency.setValueAtTime(from, t); o.frequency.linearRampToValueAtTime(to, t + 0.2);
+    o.connect(g).connect(comp); o.start(t); o.stop(t + 0.25);
+  }
+}
+// Chord sweep for a time warp
+function sfxWarp() {
+  if (!actx) return;
+  const t = actx.currentTime, freqs = [220, 277.2, 329.6, 440, 554.4];
+  freqs.forEach((f, i) => {
+    const o = actx.createOscillator(), g = envGain(t + i * 0.05, 0.15, 1.4, 0.13);
+    o.type = i % 2 ? 'triangle' : 'sine';
+    o.frequency.setValueAtTime(f, t + i * 0.05);
+    o.frequency.exponentialRampToValueAtTime(f * 4, t + i * 0.05 + 1.2);
+    o.connect(g).connect(comp); o.start(t + i * 0.05); o.stop(t + i * 0.05 + 1.8);
+  });
+  const n = noiseSrc(), bp = actx.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = 3;
+  bp.frequency.setValueAtTime(200, t); bp.frequency.exponentialRampToValueAtTime(6000, t + 1.5);
+  const ng = envGain(t, 0.4, 1.4, 0.35);
+  n.connect(bp).connect(ng).connect(comp); n.start(t); n.stop(t + 2.0);
+}
+
+// Continuous engine: filtered noise, two blade-tone oscillators and a sub rumble
+function startEngine() {
+  engine = actx.createGain(); engine.gain.value = 0.0001;
+  const lp = actx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 380; lp.Q.value = 0.9;
+  const rumble = actx.createBiquadFilter(); rumble.type = 'lowpass'; rumble.frequency.value = 130;
+  const n1 = noiseSrc(), n2 = noiseSrc();
+  const g1 = actx.createGain(); g1.gain.value = 0.5;
+  const g2 = actx.createGain(); g2.gain.value = 0.6;
+  n1.connect(lp).connect(g1).connect(engine);
+  n2.connect(rumble).connect(g2).connect(engine);
+  const blade = actx.createBiquadFilter(); blade.type = 'bandpass'; blade.frequency.value = 170; blade.Q.value = 6;
+  const bg = actx.createGain(); bg.gain.value = 0.35;
+  blade.connect(bg).connect(engine);
+  panNode = actx.createStereoPanner ? actx.createStereoPanner() : actx.createGain();
+  engine.connect(panNode).connect(comp);
+  [n1, n2].forEach(n => n.start());
+  const o1 = actx.createOscillator(), o2 = actx.createOscillator(), sub = actx.createOscillator();
+  o1.type = 'sawtooth'; o2.type = 'sawtooth'; sub.type = 'sine';
+  o1.frequency.value = 88; o2.frequency.value = 92; sub.frequency.value = 44;
+  const og = actx.createGain(); og.gain.value = 0.16;
+  o1.connect(blade); o2.connect(blade); sub.connect(og).connect(engine);
+  o1.start(); o2.start(); sub.start();
+  hum = { osc1: o1, osc2: o2, sub };
+}
+// Engine note follows speed and turning; Y coordinates map to left/right in Web Audio
+function setEngine(level, speed, turn) {
+  if (!actx || !engine) return;
+  const t = actx.currentTime;
+  engine.gain.setTargetAtTime(level, t, 0.15);
+  hum.osc1.frequency.setTargetAtTime(72 + speed * 0.7, t, 0.2);
+  hum.osc2.frequency.setTargetAtTime(78 + speed * 0.8, t, 0.2);
+  hum.sub.frequency.setTargetAtTime(36 + speed * 0.3, t, 0.3);
+  if (panNode && panNode.pan) panNode.pan.setTargetAtTime(Math.max(-1, Math.min(1, -turn * 0.7)), t, 0.2);
+}
+
+// ---------- Action music: a driving loop that changes with each era ----------
+// State first, then the functions that read it, so nothing is touched before it exists.
+// Rock riffs: each era gets its own root and a pentatonic minor shape for the lead
+// ---------- One song per era ----------
+// Each era gets its own riff pattern, tempo, key, chord progression, drum feel and
+// lead motif, so the five sections sound like five different tracks.
+const SONGS = [
+  { // 1914 - a military march: triads, dotted rhythm, no lead, bugle-like fanfare
+    name: 'SOPWITH MARCH', bpm: 118, root: 55,
+    style: 'march',
+    scale: [0, 2, 4, 7, 9],
+    chords: [[0, 4, 7], [0, 4, 7], [5, 9, 12], [7, 11, 14]],   // full triads
+    // one step per eighth note: which chord voices to strike (0 = none)
+    hits: [1, 0, 1, 1, 0, 1, 1, 0],
+    kick: [0, 4, 8, 12], snareOn: [], hatOn: 'march',
+    leadOn: 999,                       // this one has no lead line at all
+    fanfareOn: 48,                     // instead a simple bugle call in the last bar
+    bend: 0, swing: 0, mute: 0.3,
+  },
+  { // 1944 - swing: walking bass, brushes, wide chords, sax-like lead
+    name: 'BIG BAND BOOGIE', bpm: 160, root: 62,
+    style: 'swing',
+    scale: [0, 2, 4, 5, 7, 9, 11],
+    chords: [[0, 4, 7, 11], [2, 5, 9, 12], [5, 9, 12, 16], [7, 11, 14, 17]],
+    hits: [1, 0, 0, 1, 1, 0, 1, 0],
+    kick: [0, 8], snareOn: [4, 12], hatOn: 'brush',
+    leadOn: 16, leadType: 'sax', bend: 4, swing: 0.38, mute: 0.18,
+    walking: true,                     // bass walks instead of chugging
+  },
+  { // 1968 - heavy blues rock: power chords, hard backbeat, wah lead
+    name: 'IRON SKY', bpm: 140, root: 58,
+    style: 'blues',
+    scale: [0, 3, 5, 6, 7, 10],
+    chords: [[0, 7], [3, 10], [5, 12], [7, 14]],
+    hits: [1, 0, 1, 0, 1, 1, 0, 1],
+    kick: [0, 3, 8, 11], snareOn: [4, 12], hatOn: 'eighths',
+    leadOn: 32, leadType: 'wah', bend: 6, swing: 0, mute: 0.5,
+  },
+  { // 1991 - grunge: dropped tuning feel, lurching stops, feedback scree
+    name: 'CHROME TEETH', bpm: 126, root: 53,
+    style: 'grunge',
+    scale: [0, 1, 5, 7, 8, 10],
+    chords: [[0, 7], [-2, 5], [3, 10], [1, 8]],
+    hits: [1, 1, 0, 0, 1, 0, 1, 1],
+    kick: [0, 6, 10, 14], snareOn: [4, 12], hatOn: 'none',
+    leadOn: 999, screechOn: 30,        // shrieking feedback instead of a melody
+    bend: 9, swing: 0, mute: 0.8, halfTime: true,
+  },
+  { // 2077 - thrash: blast beat, tremolo picking, screaming lead
+    name: 'NEON OVERDRIVE', bpm: 184, root: 49,
+    style: 'thrash',
+    scale: [0, 3, 5, 6, 7, 10],
+    chords: [[0, 7], [0, 3], [0, 7], [0, 5]],
+    hits: [1, 1, 1, 1, 1, 1, 1, 1],
+    kick: [0, 2, 4, 6, 8, 10, 12, 14], snareOn: [4, 12], hatOn: 'crash',
+    leadOn: 16, leadType: 'shred', bend: 12, swing: 0, mute: 0.9,
+    tremolo: true,
+  },
+];
+const song = () => SONGS[eraIndex % SONGS.length] || SONGS[0];
+const music = { on: false, bus: null, filter: null, nextTime: 0, step: 0 };
+let musicMuted = false;   // player-facing toggle, survives pause and death
+let musicReady = false;
+
+// Build the graph once, guarded: if anything is missing we simply stay silent.
+function musicArm() {
+  if (musicReady) return true;
+  if (!actx || !comp || !actx.createGain) return false;
+  try {
+    music.bus = actx.createGain();
+    music.bus.gain.value = 0.0001;
+    music.filter = actx.createBiquadFilter();
+    music.filter.type = 'lowpass';
+    music.filter.frequency.value = 2600;
+    music.filter.Q.value = 0.6;
+    music.bus.connect(music.filter);
+    music.filter.connect(comp);
+    musicReady = true;
+  } catch (err) {
+    musicReady = false;
+  }
+  return musicReady;
+}
+
+function musicStart() {
+  if (musicMuted) { music.on = false; return; }
+  if (!musicArm()) return;
+  if (music.on) return;
+  music.on = true;
+  music.step = 0;
+  music.nextTime = actx.currentTime + 0.2;
+  try { music.bus.gain.setTargetAtTime(0.5, actx.currentTime, 0.6); } catch (err) { music.on = false; }
+}
+
+function musicStop() {
+  if (!music.on || !musicReady) { music.on = false; return; }
+  music.on = false;
+  try { music.bus.gain.setTargetAtTime(0.0001, actx.currentTime, 0.4); } catch (err) {}
+}
+
+// A power-chord guitar voice: two detuned saws through a soft-clip, with a bright
+// attack click so every strum reads as a pick hitting a string.
+let guitarShaper = null;
+let cabFilter = null;
+let cabMid = null;
+let roomGain = null;
+function guitarChain() {
+  if (!musicReady) return null;
+  if (!guitarShaper) {
+    guitarShaper = actx.createWaveShaper();
+    const curve = new Float32Array(2048);
+    for (let i = 0; i < 2048; i++) {
+      const x = (i / 1024) - 1;
+      // asymmetric clipping: the positive half saturates earlier, which is what
+      // gives a valve amp its warm second-harmonic character
+      const bias = 0.12;
+      const pos = Math.tanh((x + bias) * 3.1);
+      const neg = Math.tanh((x - bias) * 2.4);
+      curve[i] = (x >= 0 ? pos : neg) * 0.92;
+    }
+    guitarShaper.curve = curve;
+    guitarShaper.oversample = '4x';
+    cabFilter = actx.createBiquadFilter();
+    cabFilter.type = 'lowpass';
+    cabFilter.frequency.value = 5200;   // open enough for string bite to survive
+    cabFilter.Q.value = 0.9;
+    // speaker-cabinet midrange honk, the frequency a real 4x12 box peaks at
+    cabMid = actx.createBiquadFilter();
+    cabMid.type = 'peaking';
+    cabMid.frequency.value = 900;
+    cabMid.Q.value = 0.8;
+    cabMid.gain.value = 4;
+    guitarShaper.connect(cabMid);
+    cabMid.connect(cabFilter);
+    cabFilter.connect(music.bus);
+    // a tiny room: two short delays at prime-ish times, quiet, to place the amp in a space
+    roomGain = actx.createGain();
+    roomGain.gain.value = 0.16;
+    cabFilter.connect(roomGain);
+    [0.019, 0.031].forEach(dl => {
+      const d = actx.createDelay(0.2);
+      d.delayTime.value = dl;
+      const fb = actx.createGain(); fb.gain.value = 0.22;
+      const damp = actx.createBiquadFilter(); damp.type = 'lowpass'; damp.frequency.value = 2400;
+      roomGain.connect(d); d.connect(damp); damp.connect(fb); fb.connect(d); damp.connect(music.bus);
+    });
+  }
+  return guitarShaper;
+}
+// A three-voice tube-amp guitar: two detuned saws for the strings, a triangle for
+// the body resonance, shaped through a soft-clip stage with speaker cabinet colour.
+function note(freq, at, dur, gain, type, detune) {
+  if (!musicReady) return;
+  if (!Number.isFinite(freq) || freq <= 0) return;
+  if (!Number.isFinite(at) || !Number.isFinite(dur) || dur <= 0) return;
+  if (!Number.isFinite(gain) || gain <= 0) return;
+  const dest = guitarChain();
+  if (!dest) return;
+
+  // Three strings' worth of detune, so chords beat and shimmer like real doubled guitars
+  const spread = [1.0, 1.0035, 0.9968];
+  const body = actx.createGain();
+  body.gain.setValueAtTime(0.0001, at);
+  body.gain.linearRampToValueAtTime(gain, at + 0.005);
+  body.gain.linearRampToValueAtTime(gain * 0.72, at + 0.06);
+  body.gain.linearRampToValueAtTime(gain * 0.38, at + Math.max(0.12, dur * 0.6));
+  body.gain.exponentialRampToValueAtTime(0.0001, at + dur);
+
+  // pickup resonance, then a hollow body-resonance dip-and-peak like a real guitar
+  const pickup = actx.createBiquadFilter();
+  pickup.type = 'peaking';
+  pickup.frequency.value = Math.min(5000, freq * 2);
+  pickup.Q.value = 1.2;
+  pickup.gain.value = 5;
+  const bodyRes = actx.createBiquadFilter();
+  bodyRes.type = 'peaking';
+  bodyRes.frequency.value = 230;
+  bodyRes.Q.value = 1.4;
+  bodyRes.gain.value = 4.5;
+  body.connect(pickup);
+  pickup.connect(bodyRes);
+  bodyRes.connect(dest);
+
+  const voices = [];
+  spread.forEach((mul, k) => {
+    const o = actx.createOscillator();
+    o.type = k === 2 ? 'triangle' : (type || 'sawtooth');
+    o.frequency.value = freq * mul;
+    if (detune) o.detune.value = (detune || 0) * (k === 1 ? 2 : k === 2 ? -1 : 1);
+    o.connect(body);
+    o.start(at); o.stop(at + dur + 0.06);
+    voices.push(o);
+  });
+
+  // pick scrape: noise through a narrow band, very short
+  const pick = noiseSrc(), pf = actx.createBiquadFilter(), pg = actx.createGain();
+  pf.type = 'bandpass'; pf.frequency.value = Math.min(6000, freq * 6); pf.Q.value = 1.6;
+  pg.gain.setValueAtTime(0.0001, at);
+  pg.gain.linearRampToValueAtTime(gain * 0.42, at + 0.002);
+  pg.gain.exponentialRampToValueAtTime(0.0001, at + 0.04);
+  pick.connect(pf); pf.connect(pg); pg.connect(dest);
+  pick.start(at); pick.stop(at + 0.06);
+
+  // fret/string buzz right at the attack, the detail that stops it sounding synthetic
+  const buzz = actx.createOscillator(), bg = actx.createGain();
+  buzz.type = 'square';
+  // deliberately inharmonic: real string buzz is not a clean multiple of the note
+  buzz.frequency.value = freq * 7.13;
+  bg.gain.setValueAtTime(0.0001, at);
+  bg.gain.linearRampToValueAtTime(gain * 0.05, at + 0.001);
+  bg.gain.exponentialRampToValueAtTime(0.0001, at + 0.018);
+  buzz.connect(bg); bg.connect(dest);
+  buzz.start(at); buzz.stop(at + 0.03);
+}
+// A plucked bass: two strings through a resonant low-pass that closes as the note
+// decays, which is what makes a real bass note sound like it is being fingered
+function bassNote(freq, at, dur, gain) {
+  if (!musicReady) return;
+  if (!Number.isFinite(freq) || freq <= 0 || !Number.isFinite(at)) return;
+  if (!Number.isFinite(dur) || dur <= 0 || !Number.isFinite(gain)) return;
+  const a = actx.createOscillator(), b = actx.createOscillator(), sub = actx.createOscillator();
+  const g = actx.createGain(), lp = actx.createBiquadFilter();
+  a.type = 'sawtooth'; b.type = 'triangle'; sub.type = 'sine';
+  a.frequency.value = freq;
+  b.frequency.value = freq * 1.005;
+  sub.frequency.value = freq / 2;
+  lp.type = 'lowpass'; lp.Q.value = 6;
+  lp.frequency.setValueAtTime(Math.min(4000, freq * 14), at);
+  lp.frequency.exponentialRampToValueAtTime(Math.max(200, freq * 2.2), at + Math.min(0.45, dur));
+  g.gain.setValueAtTime(0.0001, at);
+  g.gain.linearRampToValueAtTime(gain, at + 0.006);
+  g.gain.linearRampToValueAtTime(gain * 0.55, at + 0.18);
+  g.gain.exponentialRampToValueAtTime(0.0001, at + dur);
+  a.connect(lp); b.connect(lp); lp.connect(g); sub.connect(g); g.connect(music.bus);
+  [a, b, sub].forEach(o => { o.start(at); o.stop(at + dur + 0.05); });
+  // string slap on the attack
+  const n = noiseSrc(), bp = actx.createBiquadFilter(), ng = actx.createGain();
+  bp.type = 'bandpass'; bp.frequency.value = Math.min(3500, freq * 9); bp.Q.value = 1.3;
+  ng.gain.setValueAtTime(0.0001, at);
+  ng.gain.linearRampToValueAtTime(gain * 0.35, at + 0.002);
+  ng.gain.exponentialRampToValueAtTime(0.0001, at + 0.035);
+  n.connect(bp); bp.connect(ng); ng.connect(music.bus);
+  n.start(at); n.stop(at + 0.05);
+}
+
+function drum(at, kind, gain) {
+  if (!musicReady) return;
+  if (!Number.isFinite(at) || !Number.isFinite(gain) || gain <= 0) return;
+
+  if (kind === 'kick') {
+    // two layers: a click for the beater and a low sine for the drum body
+    const click = noiseSrc(), cf = actx.createBiquadFilter(), cg = actx.createGain();
+    cf.type = 'bandpass'; cf.frequency.value = 2400; cf.Q.value = 0.9;
+    cg.gain.setValueAtTime(gain * 0.3, at);
+    cg.gain.exponentialRampToValueAtTime(0.0001, at + 0.03);
+    click.connect(cf); cf.connect(cg); cg.connect(music.bus);
+    click.start(at); click.stop(at + 0.05);
+
+    const o = actx.createOscillator(), g = actx.createGain();
+    o.type = 'sine';
+    o.frequency.setValueAtTime(165, at);
+    o.frequency.exponentialRampToValueAtTime(38, at + 0.19);
+    g.gain.setValueAtTime(gain, at);
+    g.gain.linearRampToValueAtTime(gain * 0.7, at + 0.012);
+    g.gain.exponentialRampToValueAtTime(0.0001, at + 0.3);
+    o.connect(g); g.connect(music.bus);
+    o.start(at); o.stop(at + 0.32);
+    return;
+  }
+
+  if (kind === 'snare') {
+    // wires (noise) over a tuned shell (two short tones), which is what a snare is
+    const n = noiseSrc(), bp = actx.createBiquadFilter(), ng = actx.createGain();
+    bp.type = 'bandpass'; bp.frequency.value = 2100; bp.Q.value = 0.7;
+    ng.gain.setValueAtTime(gain, at);
+    ng.gain.exponentialRampToValueAtTime(0.0001, at + 0.15);
+    n.connect(bp); bp.connect(ng); ng.connect(music.bus);
+    n.start(at); n.stop(at + 0.18);
+
+    [185, 278].forEach((f, k) => {
+      const o = actx.createOscillator(), g = actx.createGain();
+      o.type = 'triangle'; o.frequency.value = f;
+      g.gain.setValueAtTime(gain * (k ? 0.28 : 0.4), at);
+      g.gain.exponentialRampToValueAtTime(0.0001, at + 0.09);
+      o.connect(g); g.connect(music.bus);
+      o.start(at); o.stop(at + 0.12);
+    });
+    return;
+  }
+
+  // hi-hat: bright noise with a metallic ring from a high band-pass
+  const n = noiseSrc(), hp = actx.createBiquadFilter(), ng = actx.createGain();
+  hp.type = 'highpass'; hp.frequency.value = 8200;
+  ng.gain.setValueAtTime(gain, at);
+  ng.gain.exponentialRampToValueAtTime(0.0001, at + 0.045);
+  n.connect(hp); hp.connect(ng); ng.connect(music.bus);
+  n.start(at); n.stop(at + 0.07);
+}
+
+function musicPump(now) {
+  if (!music.on || !musicReady) return;
+  const sg = song();
+  const spb = 60 / sg.bpm;
+  if (!Number.isFinite(spb) || spb <= 0) return;
+  if (!Number.isFinite(music.nextTime)) { music.nextTime = actx.currentTime + 0.2; return; }
+  if (!Number.isFinite(music.step)) music.step = 0;
+  const root = sg.root * 2;
+  const sc = sg.scale || [0];
+  const chords = sg.chords || [[0, 7]];
+  const hits = sg.hits || [1, 0, 1, 0, 1, 0, 1, 0];
+  const swing = Number.isFinite(sg.swing) ? sg.swing : 0;
+  const mute = Number.isFinite(sg.mute) ? sg.mute : 0.4;
+  let guard = 0;
+  while (music.nextTime < actx.currentTime + 0.25 && guard++ < 24) {
+    const t = music.nextTime;
+    const step = Math.floor(music.step) % 64;
+    const inBar = step % 16;
+    const bar = Math.floor(step / 16);
+    const eighth = Math.floor(inBar / 2);
+    const semis = n => Math.pow(2, n / 12);
+    const degree = k => {
+      const idx = Math.floor(Math.abs(k)) % sc.length;
+      const v = sc[idx];
+      return Number.isFinite(v) ? v : 0;
+    };
+    const chord = chords[bar % chords.length] || [0];
+    const voices = chord.filter(v => Number.isFinite(v));
+
+    // ---- drums in this song's own feel ----
+    if (sg.kick.indexOf(inBar) !== -1) drum(t, 'kick', inBar % 4 === 0 ? 0.62 : 0.44);
+    if (sg.snareOn.indexOf(inBar) !== -1) drum(t, 'snare', 0.44);
+    if (sg.hatOn === 'brush') { if (inBar % 4 === 1) drum(t, 'hat', 0.035); }
+    else if (sg.hatOn === 'march') { if (inBar % 4 === 0) drum(t, 'snare', 0.18); }
+    else if (sg.hatOn === 'crash') { if (inBar === 0) drum(t, 'hat', 0.14); }
+    else if (sg.hatOn === 'sixteenths') drum(t, 'hat', inBar % 2 ? 0.05 : 0.07);
+    else if (sg.hatOn === 'eighths' && inBar % 2 === 0) drum(t, 'hat', 0.06);
+    if (sg.halfTime && inBar === 8) drum(t, 'snare', 0.3);
+    if (boss && (inBar === 10 || inBar === 14)) drum(t, 'snare', 0.24);
+
+    // ---- guitars play this song's chord vocabulary and rhythm ----
+    if (inBar % 2 === 0 && hits[eighth % hits.length]) {
+      const open = eighth % 2 === 0;
+      const dur = spb * (open ? (sg.style === 'swing' ? 1.1 : 0.85) : 0.15);
+      if (open) {
+        // strike every voice of this song's chord: triads for the early eras,
+        // power chords for the rock eras
+        voices.forEach((v, k) => {
+          const f = root * semis(v) / 2;
+          if (Number.isFinite(f) && f > 0) note(f, t, dur, k === 0 ? 0.19 : 0.13, 'sawtooth', k % 2 ? 5 : -5);
+        });
+      } else {
+        // muted chug, tighter or looser depending on the era
+        const f = root * semis(voices[0] || 0) / 2;
+        if (Number.isFinite(f) && f > 0) note(f, t, spb * 0.14, 0.14 * (0.6 + mute * 0.5), 'sawtooth', -5);
+      }
+    }
+    // thrash tremolo: rapid pick across the chord root
+    if (sg.tremolo && inBar % 2 === 0) {
+      const f = root * semis(voices[0] || 0) / 2;
+      if (Number.isFinite(f) && f > 0) note(f, t + spb * 0.5, spb * 0.2, 0.08, 'sawtooth', 3);
+    }
+
+    // ---- bass: walks for swing, locks with the kick for rock ----
+    if (sg.walking) {
+      const deg = [0, 2, 4, 5][bar % 4];
+      const bf = root * semis(deg) / 4;
+      if (inBar % 4 === 0 && Number.isFinite(bf) && bf > 0) bassNote(bf, t, spb * 0.9, 0.26);
+    } else if (sg.kick.indexOf(inBar) !== -1 || eighth % 2 === 1) {
+      const bf = root * semis(voices[0] || 0) / 4;
+      if (Number.isFinite(bf) && bf > 0) bassNote(bf, t, spb * (eighth % 2 === 1 ? 0.22 : 0.52), 0.27);
+    }
+
+    // ---- the lead, or this song's alternative to one ----
+    if (sg.leadType && step >= sg.leadOn && inBar % 4 === 2) {
+      const lf = root * semis(degree((step / 2) + bar)) / 2;
+      if (Number.isFinite(lf) && lf > 0) {
+        if (sg.leadType === 'sax') note(lf, t, spb * 1.5, 0.13, 'square', 4);
+        else if (sg.leadType === 'shred') note(lf * 2, t, spb * 0.45, 0.1, 'sawtooth', 10);
+        else note(lf, t, spb * 0.9, 0.12, 'sawtooth', 8);
+      }
+    }
+    // a bugle fanfare rather than a solo, for the march
+    if (sg.fanfareOn && step >= sg.fanfareOn && inBar % 4 === 0) {
+      const seq = [0, 4, 7, 4];
+      const lf = root * semis(seq[Math.floor(step / 4) % seq.length]) / 2;
+      if (Number.isFinite(lf) && lf > 0) note(lf, t, spb * 0.7, 0.14, 'square', 0);
+    }
+    // feedback screech instead of a melody, for the grunge era
+    if (sg.screechOn && step >= sg.screechOn && inBar % 8 === 6) {
+      const lf = root * semis(degree(1) + sg.bend) / 2;
+      if (Number.isFinite(lf) && lf > 0) note(lf, t, spb * 1.2, 0.09, 'sawtooth', 30);
+    }
+    if (sg.bend && step === 62) {
+      const lf = root * semis(degree(3) + sg.bend) / 2;
+      if (Number.isFinite(lf) && lf > 0) note(lf, t, spb * 1.8, 0.15, 'sawtooth', 14);
+    }
+
+    music.step = (step + 1) % 64;
+    music.nextTime = t + spb * (inBar % 2 === 0 ? (1 + swing) : (1 - swing)) / 2;
+  }
+  const cutoff = 3000 + (Number.isFinite(score) ? (score % 1000) * 0.6 : 0);
+  if (Number.isFinite(cutoff)) {
+    try { music.filter.frequency.setTargetAtTime(Math.min(11000, cutoff), actx.currentTime, 0.4); } catch (err) {}
+  }
+}
+
+// ---------- Real music: the five tracks, one per era ----------
+// Files are streamed from the user's own Drive folder and looped. If a track fails
+// to load, the synthesised score takes over so the game is never silent.
+const TRACK_URLS = {
+  1914: [
+    'https://raw.githubusercontent.com/izzyrios-source/rfree/refs/heads/main/1914.mp3.mp3',
+    'https://raw.githubusercontent.com/izzyrios-source/rfree/refs/heads/main/1914.mp3',
+  ],
+  1944: [
+    'https://raw.githubusercontent.com/izzyrios-source/rfree/refs/heads/main/1944.mp3.mp3',
+    'https://raw.githubusercontent.com/izzyrios-source/rfree/refs/heads/main/1944.mp3',
+  ],
+  1968: [
+    'https://raw.githubusercontent.com/izzyrios-source/rfree/refs/heads/main/1968.mp3.mp3',
+    'https://raw.githubusercontent.com/izzyrios-source/rfree/refs/heads/main/1968.mp3',
+  ],
+  1991: [
+    'https://raw.githubusercontent.com/izzyrios-source/rfree/refs/heads/main/1991.mp3.mp3',
+    'https://raw.githubusercontent.com/izzyrios-source/rfree/refs/heads/main/1991.mp3',
+  ],
+  2077: [
+    'https://raw.githubusercontent.com/izzyrios-source/rfree/refs/heads/main/2077.mp3.mp3',
+    'https://raw.githubusercontent.com/izzyrios-source/rfree/refs/heads/main/2077.mp3',
+  ],
+};
+const trackAudio = {};        // year -> HTMLAudioElement, created on first use
+let trackPlaying = null;      // the year currently playing
+let realMusicMuted = false;
+
+// A track's own gain node, so the music button and the overall level both apply.
+let musicBusReal = null;
+function realMusicBus() {
+  if (musicBusReal || !actx) return musicBusReal;
+  musicBusReal = actx.createGain();
+  musicBusReal.gain.value = 0.9;
+  musicBusReal.connect(comp);
+  return musicBusReal;
+}
+// Each year has a list of candidate URLs; the first that loads wins. A renamed or
+// moved file therefore falls through to the next spelling instead of going silent.
+function getTrack(year) {
+  if (trackAudio[year] !== undefined) return trackAudio[year];
+  const urls = TRACK_URLS[year];
+  if (!urls || !urls.length) { trackAudio[year] = null; return null; }
+  const a = new Audio();
+  a.loop = true;                 // every track loops, as chosen
+  a.preload = 'auto';
+  a.volume = 0.85;
+  let idx = 0;
+  a.src = urls[0];
+  // If this spelling 404s, try the next before giving up on the era.
+  a.addEventListener('error', () => {
+    idx++;
+    if (idx < urls.length) { a.src = urls[idx]; try { a.load(); } catch (err) {} }
+    else { trackAudio[year] = null; }
+  });
+  trackAudio[year] = a;
+  return a;
+}
+// Warm the era's track while the level loads, so it is ready when the warp lands.
+function preloadTrack(year) { const a = getTrack(year); if (a) { try { a.load(); } catch (err) {} } }
+function playTrackForEra(year) {
+  if (realMusicMuted || !actx) return;
+  const want = getTrack(year);
+  if (!want) { if (!musicMuted) musicStart(); return; }
+  if (trackPlaying === year && !want.paused) return;
+  // stop whatever was playing, then start the new era's track from the top
+  for (const y of Object.keys(trackAudio)) {
+    const a = trackAudio[y];
+    if (a && !a.paused) { try { a.pause(); a.currentTime = 0; } catch (err) {} }
+  }
+  // stand the synth score down first, so the two never overlap
+  musicStop();
+  const attempt = (retry) => {
+    const p = want.play();
+    if (p && p.catch) p.catch(() => {
+      if (retry > 0) setTimeout(() => attempt(retry - 1), 700);
+      else {
+        // the track would not start at all: give the synth back so we are not silent
+        trackPlaying = null;
+        if (!musicMuted) musicStart();
+      }
+    });
+  };
+  attempt(2);
+  trackPlaying = year;
+}
+function stopRealMusic() {
+  for (const y of Object.keys(trackAudio)) {
+    const a = trackAudio[y];
+    if (a && !a.paused) { try { a.pause(); } catch (err) {} }
+  }
+  trackPlaying = null;
+}
+
+// ---------- Cockpit ----------
+const cockpit = new THREE.Group();
+player.add(cockpit);
+const dashMat = new THREE.MeshStandardMaterial({ color: 0x2b2f36, roughness: 0.55, metalness: 0.5 });
+const bodyMat = new THREE.MeshStandardMaterial({ color: 0xc8302c, roughness: 0.35, metalness: 0.3 });
+
+// Tapered wing: span per side, root chord, tip chord, tip offset (forward +), thickness
+function wingGeo(span, root, tip, sweep, th) {
+  const s = new THREE.Shape();
+  s.moveTo(-span, sweep - tip / 2); s.lineTo(-span, sweep + tip / 2); s.lineTo(0, root / 2);
+  s.lineTo(span, sweep + tip / 2); s.lineTo(span, sweep - tip / 2); s.lineTo(0, -root / 2); s.closePath();
+  const geo = new THREE.ExtrudeGeometry(s, { depth: th, bevelEnabled: true, bevelThickness: th * 0.4, bevelSize: th * 0.4, bevelSegments: 2 });
+  geo.translate(0, 0, -th / 2); geo.rotateX(-Math.PI / 2);
+  return geo;
+}
+function finGeo(len, h, th) {
+  const s = new THREE.Shape();
+  s.moveTo(len * 0.4, 0); s.lineTo(-len * 0.6, 0); s.lineTo(-len * 0.75, h); s.lineTo(-len * 0.3, h); s.closePath();
+  const geo = new THREE.ExtrudeGeometry(s, { depth: th, bevelEnabled: false });
+  geo.translate(0, 0, -th / 2); geo.rotateY(Math.PI / 2);
+  return geo;
+}
+
+function makeAircraft(shape, color, scale) {
+  const g = new THREE.Group();
+  const jet = shape === 'jet';
+  const body = new THREE.MeshStandardMaterial({ color, roughness: jet ? 0.35 : 0.6, metalness: jet || shape === 'saucer' ? 0.7 : 0.1 });
+  const dark = new THREE.MeshStandardMaterial({ color: 0x1c1c1c, roughness: 0.5, metalness: 0.5 });
+  const glass = new THREE.MeshStandardMaterial({ color: 0x9fd8ff, roughness: 0.05, metalness: 0.9, transparent: true, opacity: 0.8 });
+  const glow = new THREE.MeshBasicMaterial({ color: shape === 'saucer' ? 0x66ffee : 0xff9a3a, transparent: true, opacity: 0.85,
+    blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false });
+  const add = (geo, mat, x = 0, y = 0, z = 0, parent = g) => { const m = new THREE.Mesh(geo, mat); m.position.set(x, y, z); parent.add(m); return m; };
+
+  if (shape === 'saucer') {
+    const inner = new THREE.Group(); inner.userData.spinY = true; g.add(inner);
+    const prof = [[0.01, -0.6], [2.2, -0.42], [3.6, 0], [2.4, 0.35], [1.2, 0.5], [0.01, 0.55]].map(p => new THREE.Vector2(p[0], p[1]));
+    add(new THREE.LatheGeometry(prof, 40), body, 0, 0, 0, inner);
+    add(new THREE.SphereGeometry(1.3, 24, 12, 0, Math.PI * 2, 0, Math.PI / 2), glass, 0, 0.45, 0, inner);
+    for (let i = 0; i < 12; i++) {
+      const a = i / 12 * Math.PI * 2;
+      add(new THREE.SphereGeometry(0.2, 8, 6), glow, Math.cos(a) * 3.25, 0.03, Math.sin(a) * 3.25, inner);
+    }
+    const ring = add(new THREE.TorusGeometry(1.6, 0.14, 8, 40), glow, 0, -0.55, 0, inner);
+    ring.rotation.x = Math.PI / 2;
+  } else {
+    const L = jet ? 6.5 : 4.8, R = jet ? 0.5 : 0.55, pts = [];
+    for (let i = 16; i >= 0; i--) {
+      const t = i / 16;
+      const r = jet ? (t < 0.35 ? R * Math.pow(t / 0.35, 0.6) : R * (1 - (t - 0.35) * 0.35))
+                    : (t < 0.2 ? R * Math.pow(t / 0.2, 0.5) : R * (1 - Math.pow((t - 0.2) / 0.8, 1.6) * 0.75));
+      pts.push(new THREE.Vector2(Math.max(r, 0.03), L / 2 - t * L));
+    }
+    add(new THREE.LatheGeometry(pts, 20), body).rotation.x = -Math.PI / 2;
+
+    if (jet) {
+      add(wingGeo(2.6, 3.2, 0.6, -1.4, 0.1), body, 0, -0.1, 0.6);
+      add(wingGeo(1.3, 1.1, 0.4, -0.5, 0.08), body, 0, 0, L / 2 - 0.6);
+      add(finGeo(1.6, 1.4, 0.08), body, 0, 0.3, L / 2 - 0.7);
+      add(new THREE.SphereGeometry(0.38, 16, 10), glass, 0, 0.36, -L * 0.18).scale.set(1, 0.8, 2.6);
+      add(new THREE.CylinderGeometry(0.36, 0.42, 0.5, 14, 1, true), dark, 0, 0, L / 2 + 0.1).rotation.x = Math.PI / 2;
+      add(new THREE.ConeGeometry(0.3, 1.8, 12, 1, true), glow, 0, 0, L / 2 + 1.1).rotation.x = Math.PI / 2;
+      for (const s of [-1, 1]) add(new THREE.CircleGeometry(0.35, 20), roundelMat, s * 1.6, 0.0, 1.2).rotation.x = -Math.PI / 2;
+    } else {
+      const wy = -0.25;
+      add(wingGeo(3.4, 1.5, 0.8, 0.05, 0.12), body, 0, wy, -0.5);
+      if (shape === 'biplane') {
+        add(wingGeo(3.4, 1.4, 0.8, 0.05, 0.12), body, 0, 1.0, -0.7);
+        for (const s of [-1, 1]) for (const zz of [-1.0, -0.2]) add(new THREE.CylinderGeometry(0.04, 0.04, 1.25, 6), dark, s * 2.2, 0.375, zz);
+        add(new THREE.TorusGeometry(0.32, 0.06, 6, 16), dark, 0, 0.42, 0.1).rotation.x = Math.PI / 2;
+      } else {
+        add(new THREE.SphereGeometry(0.34, 16, 10, 0, Math.PI * 2, 0, Math.PI / 2), glass, 0, 0.35, -0.1).scale.set(1, 1, 2.2);
+      }
+      add(wingGeo(1.4, 0.9, 0.5, -0.15, 0.07), body, 0, 0.05, L / 2 - 0.45);
+      add(finGeo(1.1, 0.9, 0.07), body, 0, 0.1, L / 2 - 0.4);
+      add(new THREE.ConeGeometry(0.2, 0.45, 12), dark, 0, 0, -L / 2 - 0.15).rotation.x = -Math.PI / 2;
+      const prop = new THREE.Group(); prop.position.set(0, 0, -L / 2 - 0.08); prop.userData.prop = true; g.add(prop);
+      for (let k = 0; k < 3; k++) {
+        const piv = new THREE.Group(); piv.rotation.z = k * Math.PI * 2 / 3; prop.add(piv);
+        add(new THREE.BoxGeometry(0.14, 1.0, 0.04), dark, 0, 0.5, 0, piv);
+      }
+      add(new THREE.CircleGeometry(1.05, 24), new THREE.MeshBasicMaterial({ color: 0x777777, transparent: true, opacity: 0.12, side: THREE.DoubleSide, depthWrite: false }), 0, 0, -L / 2 - 0.1);
+      for (const s of [-1, 1]) add(new THREE.CircleGeometry(0.38, 20), roundelMat, s * 2.4, wy + 0.115, -0.5).rotation.x = -Math.PI / 2;
+    }
+  }
+  g.scale.setScalar(scale);
+  return g;
+}
+
+// ---------- Cockpit: modelled on the reference photograph ----------
+const skinMat   = new THREE.MeshStandardMaterial({ color: 0x6d757d, roughness: 0.52, metalness: 0.8 });
+const panelMat  = new THREE.MeshStandardMaterial({ color: 0x1b2026, roughness: 0.82, metalness: 0.15 });
+const trimMat   = new THREE.MeshStandardMaterial({ color: 0x333a42, roughness: 0.44, metalness: 0.78 });
+const rubberMat = new THREE.MeshStandardMaterial({ color: 0x0e1114, roughness: 0.98, metalness: 0.0 });
+const leatherMat= new THREE.MeshStandardMaterial({ color: 0x2a1d15, roughness: 0.96, metalness: 0.02 });
+const rivetMat  = new THREE.MeshStandardMaterial({ color: 0x808891, roughness: 0.3, metalness: 1.0 });
+const frameMat  = new THREE.MeshStandardMaterial({ color: 0x3d444c, roughness: 0.36, metalness: 0.9 });
+const canopyRail = frameMat;
+const glassMat  = new THREE.MeshStandardMaterial({ color: 0xdfeeff, roughness: 0.02, metalness: 1.0,
+  transparent: true, opacity: 0.07, side: THREE.DoubleSide, depthWrite: false });
+const ledMat   = new THREE.MeshBasicMaterial({ color: 0x33ff99, toneMapped: false });
+const dimMat   = new THREE.MeshBasicMaterial({ color: 0x151b20, toneMapped: false });
+const warnMat  = new THREE.MeshBasicMaterial({ color: 0xff4422, toneMapped: false });
+const amberMat = new THREE.MeshBasicMaterial({ color: 0xffaa22, toneMapped: false });
+const sightMat = new THREE.MeshBasicMaterial({ color: 0xffbe2e, transparent: true, opacity: 0.3,
+  side: THREE.DoubleSide, depthWrite: false, toneMapped: false });
+
+// --- Sit the pilot further back: everything is parented to a seat offset group ---
+const seat = new THREE.Group();
+seat.position.set(0, -0.06, -0.42);   // forward and down: pilot sits further back
+cockpit.add(seat);
+
+// --- 1. Coaming: the padded rail your view sits just above ---
+const coamCurve = new THREE.CatmullRomCurve3([
+  new THREE.Vector3(-0.62, -0.30, -0.55),
+  new THREE.Vector3(-0.46, -0.245, -0.82),
+  new THREE.Vector3(-0.22, -0.215, -0.96),
+  new THREE.Vector3( 0.00, -0.208, -1.00),
+  new THREE.Vector3( 0.22, -0.215, -0.96),
+  new THREE.Vector3( 0.46, -0.245, -0.82),
+  new THREE.Vector3( 0.62, -0.30, -0.55),
+]);
+seat.add(new THREE.Mesh(new THREE.TubeGeometry(coamCurve, 40, 0.052, 14, false), rubberMat));
+const apronShape = new THREE.Shape();
+apronShape.moveTo(-0.64, 0); apronShape.lineTo(0.64, 0);
+apronShape.quadraticCurveTo(0.40, -0.30, 0.0, -0.34);
+apronShape.quadraticCurveTo(-0.40, -0.30, -0.64, 0);
+apronShape.closePath();
+const apron = new THREE.Mesh(new THREE.ExtrudeGeometry(apronShape,
+  { depth: 0.55, bevelEnabled: false }), panelMat);
+apron.rotation.x = Math.PI / 2 - 0.30;
+apron.position.set(0, -0.235, -0.30);
+seat.add(apron);
+
+// --- 2. Main instrument panel: six gauges on a real face ---
+const panelFace = new THREE.Group();
+panelFace.position.set(0, -0.52, -0.55);
+panelFace.rotation.x = 0.42;
+seat.add(panelFace);
+panelFace.add(new THREE.Mesh(new THREE.BoxGeometry(0.94, 0.40, 0.09), panelMat));
+for (const [w, h, x, y] of [[0.96, 0.025, 0, 0.205], [0.96, 0.025, 0, -0.205],
+                            [0.025, 0.42, -0.47, 0], [0.025, 0.42, 0.47, 0]]) {
+  const edge = new THREE.Mesh(new THREE.BoxGeometry(w, h, 0.11), trimMat);
+  edge.position.set(x, y, 0);
+  panelFace.add(edge);
+}
+function dialTex(label, col) {
+  const c = document.createElement('canvas'); c.width = c.height = 128;
+  const x = c.getContext('2d');
+  x.fillStyle = '#06080a'; x.fillRect(0, 0, 128, 128);
+  x.strokeStyle = '#c9cfd6'; x.lineWidth = 4; x.beginPath(); x.arc(64, 64, 56, 0, Math.PI * 2); x.stroke();
+  x.strokeStyle = '#5b6673'; x.lineWidth = 2;
+  for (let k = 0; k <= 24; k++) {
+    const ang = Math.PI * 0.78 + (k / 24) * Math.PI * 1.44;
+    const r1 = 46, r2 = k % 6 === 0 ? 33 : 39;
+    x.beginPath();
+    x.moveTo(64 + Math.cos(ang) * r1, 64 + Math.sin(ang) * r1);
+    x.lineTo(64 + Math.cos(ang) * r2, 64 + Math.sin(ang) * r2);
+    x.stroke();
+  }
+  x.strokeStyle = col || '#33ff99'; x.lineWidth = 4;
+  x.beginPath(); x.moveTo(64, 64); x.lineTo(64 + Math.cos(-0.75) * 36, 64 + Math.sin(-0.75) * 36); x.stroke();
+  x.fillStyle = '#e8edf2'; x.beginPath(); x.arc(64, 64, 5, 0, Math.PI * 2); x.fill();
+  x.font = 'bold 12px monospace'; x.fillStyle = '#8b96a3'; x.fillText(label, 42, 118);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+}
+function makeDial(label, col, r) {
+  const g = new THREE.Group();
+  const bez = new THREE.Mesh(new THREE.CylinderGeometry(r * 1.16, r * 1.22, r * 0.4, 24), trimMat);
+  bez.rotation.x = Math.PI / 2;
+  g.add(bez);
+  const face = new THREE.Mesh(new THREE.CircleGeometry(r, 28),
+    new THREE.MeshStandardMaterial({ map: dialTex(label, col), emissive: 0xffffff,
+      emissiveMap: dialTex(label, col), emissiveIntensity: 0.34, roughness: 0.32, metalness: 0.1 }));
+  face.position.z = r * 0.21;
+  g.add(face);
+  const gl = new THREE.Mesh(new THREE.CircleGeometry(r * 1.06, 28), glassMat);
+  gl.position.z = r * 0.24;
+  g.add(gl);
+  return g;
+}
+for (const [label, col, r, x, y] of [
+  ['SPD', '#33ff99', 0.058, -0.20,  0.10], ['ATT', '#33ff99', 0.072, 0.00, 0.10], ['ALT', '#ffaa22', 0.058, 0.20, 0.10],
+  ['VSI', '#ffaa22', 0.050, -0.20, -0.09], ['HDG', '#33ff99', 0.060, 0.00, -0.09], ['RPM', '#ffaa22', 0.050, 0.20, -0.09],
+]) {
+  const g = makeDial(label, col, r);
+  g.position.set(x, y, 0.055);
+  panelFace.add(g);
+}
+for (let i = 0; i < 7; i++) {
+  const l = new THREE.Mesh(new THREE.CircleGeometry(0.012, 12),
+    i < 3 ? ledMat : i < 6 ? amberMat : warnMat);
+  l.position.set(-0.30 + i * 0.10, 0.165, 0.05);
+  l.userData.on = true;
+  panelFace.add(l);
+}
+for (let i = 0; i < 11; i++) {
+  const sw = new THREE.Mesh(new THREE.BoxGeometry(0.026, 0.05, 0.03), rivetMat);
+  sw.position.set(-0.30 + i * 0.06, -0.175, 0.055);
+  panelFace.add(sw);
+}
+
+// --- 3. Centre pedestal: deep console between your knees ---
+const ped = new THREE.Group();
+ped.position.set(0, -0.62, -0.28);
+ped.rotation.x = 0.10;
+seat.add(ped);
+ped.add(new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.12, 1.0), panelMat));
+const spineTop = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.05, 0.98), trimMat);
+spineTop.position.set(0, 0.08, 0);
+ped.add(spineTop);
+const labelTex = (txt) => {
+  const c = document.createElement('canvas'); c.width = 256; c.height = 64;
+  const x = c.getContext('2d');
+  x.fillStyle = '#08140f'; x.fillRect(0, 0, 256, 64);
+  x.fillStyle = '#39e0a8'; x.font = 'bold 28px monospace'; x.fillText(txt, 14, 44);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+};
+['UHF', 'IFF', 'TACAN', 'NAV'].forEach((nm, i) => {
+  const blk = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.05, 0.14), trimMat);
+  blk.position.set(0, 0.10, -0.34 + i * 0.21);
+  ped.add(blk);
+  const face = new THREE.Mesh(new THREE.PlaneGeometry(0.24, 0.045),
+    new THREE.MeshBasicMaterial({ map: labelTex(nm) }));
+  face.position.set(0, 0.128, -0.34 + i * 0.21);
+  face.rotation.x = -Math.PI / 2;
+  ped.add(face);
+});
+
+// --- 4. Side consoles at each elbow ---
+for (const sgn of [-1, 1]) {
+  const con = new THREE.Group();
+  con.position.set(0.4 * sgn, -0.52, -0.34);
+  con.rotation.set(0.22, -0.3 * sgn, 0.08 * sgn);
+  seat.add(con);
+  con.add(new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.08, 0.86), panelMat));
+  const lip = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.05, 0.88), trimMat);
+  lip.position.set(0, 0.055, 0);
+  con.add(lip);
+  for (let k = 0; k < 6; k++) {
+    const cap = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.03, 0.035), rivetMat);
+    cap.position.set(0, 0.06, -0.3 + k * 0.12);
+    con.add(cap);
+  }
+}
+
+// --- 5. Canopy: upright arch overhead, with framed glazing ---
+// A complete hoop. A full torus has no arc start, so both sides always show.
+// The hoop must sit ahead of the pilot, not around him, or half of it falls behind
+// the eye and disappears. Push it forward and lean the top toward the windscreen.
+const canopyArch = new THREE.Mesh(
+  new THREE.TorusGeometry(0.74, 0.05, 12, 96), frameMat);
+canopyArch.position.set(0, -0.28, -1.18);
+canopyArch.rotation.x = -0.26;      // top leans forward over the windscreen
+seat.add(canopyArch);
+const archLining = new THREE.Mesh(
+  new THREE.TorusGeometry(0.67, 0.02, 8, 84), trimMat);
+archLining.position.set(0, -0.28, -1.16);
+archLining.rotation.x = -0.26;
+seat.add(archLining);
+for (const sgn of [-1, 1]) {
+  const rail = new THREE.Mesh(new THREE.BoxGeometry(0.055, 0.055, 1.85), frameMat);
+  rail.position.set(0.655 * sgn, -0.295, -0.58);
+  rail.rotation.set(-0.03, 0, 0.03 * sgn);
+  seat.add(rail);
+  const sill = new THREE.Mesh(new THREE.BoxGeometry(0.10, 0.10, 1.85), skinMat);
+  sill.position.set(0.70 * sgn, -0.46, -0.50);
+  seat.add(sill);
+  const pane = new THREE.Mesh(new THREE.BoxGeometry(0.012, 0.32, 1.70), glassMat);
+  pane.position.set(0.665 * sgn, -0.31, -0.55);
+  pane.renderOrder = 4;
+  seat.add(pane);
+  for (const y of [-0.16, -0.46]) {
+    const bar = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.045, 1.80), frameMat);
+    bar.position.set(0.665 * sgn, y, -0.55);
+    seat.add(bar);
+  }
+}
+// No cylindrical windscreen: a shell wrapped around the eye always reads as a dark
+// band. The framed panes either side carry the canopy look instead.
+
+// --- 6. Gunsight: tinted reflector glass over the panel ---
+const sightBody = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.09, 0.13), trimMat);
+sightBody.position.set(0, -0.30, -0.86);
+seat.add(sightBody);
+const sightGlass = new THREE.Mesh(new THREE.PlaneGeometry(0.19, 0.16), sightMat);
+sightGlass.position.set(0, -0.175, -0.82);
+sightGlass.rotation.x = -0.22;
+seat.add(sightGlass);
+
+// --- 7. Flight stick: floor of the tub, grip in view ---
+const stickBase = new THREE.Group();
+stickBase.position.set(0.19, -0.86, -0.30);
+seat.add(stickBase);
+stickBase.add(new THREE.Mesh(new THREE.CylinderGeometry(0.075, 0.09, 0.06, 18), rubberMat));
+const stickShaft = new THREE.Mesh(new THREE.CylinderGeometry(0.017, 0.024, 0.42, 14), trimMat);
+stickShaft.position.set(0, 0.23, 0);
+stickBase.add(stickShaft);
+const stickGrip = new THREE.Mesh(new THREE.CapsuleGeometry(0.034, 0.10, 8, 16), rubberMat);
+stickGrip.position.set(0, 0.48, -0.02);
+stickBase.add(stickGrip);
+const stickTrigger = new THREE.Mesh(new THREE.BoxGeometry(0.014, 0.03, 0.04), rivetMat);
+stickTrigger.position.set(0, 0.46, -0.075);
+stickBase.add(stickTrigger);
+
+// --- 8. Throttle on the left console ---
+const throttleBlock = new THREE.Group();
+throttleBlock.position.set(-0.40, -0.44, -0.30);
+seat.add(throttleBlock);
+throttleBlock.add(new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.1, 0.3), trimMat));
+for (const off of [-0.05, 0.05]) {
+  const lever = new THREE.Mesh(new THREE.BoxGeometry(0.028, 0.2, 0.05), rivetMat);
+  lever.position.set(off, 0.12, -0.04);
+  lever.rotation.x = 0.36;
+  throttleBlock.add(lever);
+  const knob = new THREE.Mesh(new THREE.SphereGeometry(0.027, 12, 10), rubberMat);
+  knob.position.set(off, 0.22, 0.02);
+  throttleBlock.add(knob);
+}
+
+// --- 9. Knee panel on your leg, as in the photo ---
+const kneeBoard = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.02, 0.34), trimMat);
+kneeBoard.position.set(-0.24, -0.62, 0.12);
+kneeBoard.rotation.set(0.1, 0.2, 0);
+seat.add(kneeBoard);
+const kneeScreen = new THREE.Mesh(new THREE.PlaneGeometry(0.2, 0.24),
+  new THREE.MeshBasicMaterial({ color: 0x0a2a24 }));
+kneeScreen.position.set(-0.24, -0.605, 0.12);
+kneeScreen.rotation.set(-Math.PI / 2 + 0.1, 0, 0.2);
+seat.add(kneeScreen);
+
+// cockpit lights so the dark panels read as solid
+const dashGlow = new THREE.PointLight(0x7fffd0, 0.5, 1.5);
+dashGlow.position.set(0, -0.5, -0.6);
+cockpit.add(dashGlow);
+const rimGlow = new THREE.PointLight(0xa8d8ff, 0.35, 2.2);
+rimGlow.position.set(0.6, -0.2, -0.5);
+cockpit.add(rimGlow);
+
+// Warning lamps that light as the fight heats up
+const lamps = [];
+for (let i = 0; i < 5; i++) {
+  const l = new THREE.Mesh(new THREE.CircleGeometry(0.011, 12), i < 2 ? ledMat : i < 4 ? amberMat : warnMat);
+  l.position.set(-0.1 + i * 0.05, -0.868, -1.012); l.rotation.x = -0.95; l.userData.on = true; cockpit.add(l); lamps.push(l);
+}
+
+// Windscreen brace bar across the top of the frame, tying the canopy together
+const brace = new THREE.Mesh(new THREE.CylinderGeometry(0.014, 0.014, 1.06, 10), canopyRail);
+brace.rotation.z = Math.PI / 2;
+brace.position.set(0, -0.175, -1.3);
+cockpit.add(brace);
+const braceDrop = new THREE.Mesh(new THREE.CylinderGeometry(0.011, 0.011, 0.2, 10), canopyRail);
+braceDrop.position.set(0, -0.27, -1.3);
+braceDrop.rotation.x = 0.3;
+cockpit.add(braceDrop);
+
+// Padded leather roll along the front of the coaming, like a real cockpit combing
+const roll = new THREE.Mesh(new THREE.CylinderGeometry(0.034, 0.034, 0.86, 14, 1, false), leatherMat);
+roll.rotation.set(Math.PI / 2, 0, Math.PI / 2);
+roll.position.set(0, -0.845, -1.06);
+cockpit.add(roll);
+// stitching along the roll: a thin bright line reads as thread
+const stitch = new THREE.Mesh(new THREE.TorusGeometry(0.0345, 0.002, 4, 40, Math.PI), rivetMat);
+stitch.rotation.set(0, Math.PI / 2, 0);
+stitch.position.copy(roll.position);
+stitch.scale.set(0.86 / 0.069, 1, 1);
+cockpit.add(stitch);
+
+// Canopy latch handles above each shoulder
+for (const sgn of [-1, 1]) {
+  const latch = new THREE.Mesh(new THREE.BoxGeometry(0.055, 0.018, 0.02), rivetMat);
+  latch.position.set(0.47 * sgn, -0.31, -1.02);
+  latch.rotation.set(0.05, 0.2 * sgn, 0.1 * sgn);
+  cockpit.add(latch);
+}
+
+// Dash compass in a brass-toned housing, off to one side like the real thing
+const compassHousing = new THREE.Mesh(new THREE.CylinderGeometry(0.032, 0.032, 0.022, 20), rivetMat);
+compassHousing.rotation.x = Math.PI / 2 - 0.42;
+compassHousing.position.set(-0.33, -0.87, -1.0);
+cockpit.add(compassHousing);
+const compassFace = new THREE.Mesh(new THREE.CircleGeometry(0.026, 24),
+  new THREE.MeshStandardMaterial({ map: dialTex('COMP', '#ffaa22'), emissive: 0xffffff,
+    emissiveMap: dialTex('COMP', '#ffaa22'), emissiveIntensity: 0.3, roughness: 0.4 }));
+compassFace.position.set(-0.33, -0.869, -0.999);
+compassFace.rotation.x = Math.PI / 2 - 0.42;
+cockpit.add(compassFace);
+
+// Oxygen hose: a flexible tube from the panel to the pilot's side
+const hosePath = new THREE.CatmullRomCurve3([
+  new THREE.Vector3(0.3, -1.0, -0.95),
+  new THREE.Vector3(0.38, -0.9, -0.8),
+  new THREE.Vector3(0.42, -0.74, -0.6),
+  new THREE.Vector3(0.4, -0.6, -0.42),
+]);
+const hose = new THREE.Mesh(new THREE.TubeGeometry(hosePath, 28, 0.012, 8, false),
+  new THREE.MeshStandardMaterial({ color: 0x1a1c1e, roughness: 0.85, metalness: 0.05 }));
+cockpit.add(hose);
+
+// Centre console switch banks either side of the throttle quadrant
+for (const side of [-1, 1]) {
+  const bank = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.03, 0.16), trimMat);
+  bank.position.set(0.24 * side, -1.11, -0.6);
+  bank.rotation.set(0.34, 0.2 * side, 0);
+  cockpit.add(bank);
+  for (let k = 0; k < 4; k++) {
+    const sw = new THREE.Mesh(new THREE.BoxGeometry(0.016, 0.012, 0.03), rivetMat);
+    sw.position.set((0.21 + k * 0.02) * side, -1.09, -0.62);
+    sw.rotation.set(0.34, 0, 0);
+    cockpit.add(sw);
+  }
+}
+
+// Nose: solid sculpted skin from the windscreen to a sharp radome point. Every
+// piece here is a closed surface - no thin rings, no wire-looking rods.
+const fusPts = [];
+for (let k = 22; k >= 0; k--) {
+  const t = k / 22;                        // 0 at the tip, 1 at the windscreen
+  // long, gently-curved boat-tail: wide at the cockpit, drawn to a needle
+  const r = 0.10 + 0.16 * Math.pow(t, 0.62) - 0.055 * Math.pow(t, 3.2);
+  fusPts.push(new THREE.Vector2(Math.max(r * (1 - Math.pow(1 - t, 0.35)), 0.005), -t * 8.2));
+}
+const noseGeo = new THREE.LatheGeometry(fusPts, 40);
+const nose = new THREE.Mesh(noseGeo, bodyMat);
+nose.rotation.x = -Math.PI / 2;
+nose.position.set(0, -1.44, -1.35);
+cockpit.add(nose);
+
+// Radome: a tapered cap that continues the skin to the very point
+const radomePts = [];
+for (let k = 10; k >= 0; k--) {
+  const t = k / 10;
+  radomePts.push(new THREE.Vector2(Math.max(0.052 * Math.pow(t, 0.7), 0.004), -t * 0.85));
+}
+const radome = new THREE.Mesh(new THREE.LatheGeometry(radomePts, 32), panelMat);
+radome.rotation.x = -Math.PI / 2;
+radome.position.set(0, -1.44, -9.55);
+cockpit.add(radome);
+
+// A raised canopy fairing: a solid wedge from your windscreen out onto the nose
+const fairShape = new THREE.Shape();
+fairShape.moveTo(-0.13, 0); fairShape.lineTo(0.13, 0);
+fairShape.lineTo(0.09, 0.085); fairShape.lineTo(-0.09, 0.085);
+fairShape.closePath();
+const fairing = new THREE.Mesh(
+  new THREE.ExtrudeGeometry(fairShape, { depth: 1.5, bevelEnabled: true,
+    bevelThickness: 0.02, bevelSize: 0.02, bevelSegments: 3 }), bodyMat);
+fairing.rotation.x = -Math.PI / 2 + 0.06;
+fairing.position.set(0, -1.40, -2.9);
+cockpit.add(fairing);
+// solid windscreen glass sitting on the fairing, sloping toward you
+const windscreen = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.11, 0.5), glassMat);
+windscreen.position.set(0, -1.36, -1.62);
+windscreen.rotation.x = 0.28;
+cockpit.add(windscreen);
+
+// Chin intake: a solid wedge with a dark face, not a thin plate
+const intake = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.2, 1.1), panelMat);
+intake.position.set(0, -1.56, -4.0);
+intake.rotation.x = -0.04;
+cockpit.add(intake);
+const intakeFace = new THREE.Mesh(new THREE.PlaneGeometry(0.22, 0.16),
+  new THREE.MeshBasicMaterial({ color: 0x04060a }));
+intakeFace.position.set(0, -1.56, -4.56);
+cockpit.add(intakeFace);
+
+// Two solid strakes running down the nose sides, giving it shoulders
+for (const sgn of [-1, 1]) {
+  const strake = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.09, 2.4), bodyMat);
+  strake.position.set(0.115 * sgn, -1.44, -4.6);
+  strake.rotation.set(-0.02, 0, 0.28 * sgn);
+  cockpit.add(strake);
+}
+
+// Outer wing with a leading-edge strip and a pitot boom
+const pWing = new THREE.Mesh(wingGeo(4.6, 1.5, 0.7, -0.9, 0.09), bodyMat);
+pWing.position.set(0, -1.5, -2.4);
+cockpit.add(pWing);
+const pitot = new THREE.Mesh(new THREE.CylinderGeometry(0.008, 0.008, 0.5, 8), rivetMat);
+pitot.rotation.x = Math.PI / 2;
+pitot.position.set(1.4, -1.48, -3.0);
+cockpit.add(pitot);
+// Cockpit lighting: a soft instrument glow under the panel, plus a cool rim light
+// from the canopy side so the metal bezels pick up a highlight.
+const gaugeGlow = new THREE.PointLight(0x66ffcc, 0.55, 1.8);
+gaugeGlow.position.set(0, -0.88, -0.95);
+cockpit.add(gaugeGlow);
+const panelGlow = new THREE.PointLight(0xffd9a0, 0.35, 1.4);
+panelGlow.position.set(0, -0.96, -1.1);
+cockpit.add(panelGlow);
+const rimLight = new THREE.PointLight(0xa8d8ff, 0.4, 2.4);
+rimLight.position.set(0.7, -0.2, -0.9);
+cockpit.add(rimLight);
+
+// HUD panel on the dashboard
+const hudCanvas = document.createElement('canvas');
+hudCanvas.width = 1024; hudCanvas.height = 560;
+const hctx = hudCanvas.getContext('2d');
+const hudTex = new THREE.CanvasTexture(hudCanvas);
+hudTex.colorSpace = THREE.SRGBColorSpace;
+const hud = new THREE.Mesh(new THREE.PlaneGeometry(0.95, 0.5),
+  new THREE.MeshBasicMaterial({ map: hudTex, transparent: true, depthTest: false }));
+hud.renderOrder = 10;
+hud.position.set(0, -0.60, -1.06); hud.rotation.x = -0.34; cockpit.add(hud);
+
+// Desktop crosshair
+const crosshair = new THREE.Mesh(new THREE.RingGeometry(0.06, 0.08, 24),
+  new THREE.MeshBasicMaterial({ color: 0x00ffff, depthTest: false }));
+crosshair.position.z = -4; crosshair.renderOrder = 11; camera.add(crosshair);
+
+// Damage flash
+const flash = new THREE.Mesh(new THREE.SphereGeometry(0.2, 12, 8),
+  new THREE.MeshBasicMaterial({ color: 0xff0000, side: THREE.BackSide, transparent: true, opacity: 0, depthTest: false }));
+flash.renderOrder = 12; camera.add(flash);
+
+// ---------- Controllers ----------
+const controllers = [0, 1].map(i => {
+  const c = renderer.xr.getController(i);
+  player.add(c);
+  c.addEventListener('connected', e => { c.userData.hand = e.data.handedness; c.userData.gamepad = e.data.gamepad; });
+  c.addEventListener('disconnected', () => { c.userData.hand = null; c.userData.gamepad = null; });
+  const line = new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3(0, 0, -1)]),
+    new THREE.LineBasicMaterial({ color: 0x00ffff, transparent: true, opacity: 0.6 }));
+  line.scale.z = 25; c.add(line);
+  return c;
+});
+
+// ---------- On-screen buttons: music, pause, quit ----------
+// Drawn on the dashboard screen, so they are reachable in both desktop and VR.
+let uiButtons = [];       // filled in by the HUD drawing code, read by the pointer handler
+let hoveredButton = null; // set by the pointer handler, read by the drawing code
+let paused = false, pauseHeld = 0;
+const BTN = { w: 190, h: 40, y: 428, gap: 14 };
+function buttonRects() {
+  const total = BTN.w * 3 + BTN.gap * 2;
+  const x0 = (1024 - total) / 2;
+  return [
+    { id: 'music', x: x0,                                    y: BTN.y, w: BTN.w, h: BTN.h },
+    { id: 'pause', x: x0 + (BTN.w + BTN.gap),                y: BTN.y, w: BTN.w, h: BTN.h },
+    { id: 'quit',  x: x0 + (BTN.w + BTN.gap) * 2,            y: BTN.y, w: BTN.w, h: BTN.h },
+  ];
+}
+function drawButtons(c) {
+  const labels = {
+    music: musicMuted ? 'MUSIC OFF' : 'MUSIC ON',
+    pause: paused ? 'RESUME' : 'PAUSE',
+    quit: 'QUIT',
+  };
+  for (const b of buttonRects()) {
+    const active = (b.id === 'music' && !musicMuted) || (b.id === 'pause' && paused);
+    const hover = hoveredButton === b.id;
+    c.fillStyle = active ? 'rgba(0,120,110,0.85)' : 'rgba(8,26,32,0.85)';
+    c.fillRect(b.x, b.y, b.w, b.h);
+    c.strokeStyle = hover ? '#ffffff' : active ? '#7cffb0' : '#0ff';
+    c.lineWidth = hover ? 5 : 3;
+    c.strokeRect(b.x, b.y, b.w, b.h);
+    c.fillStyle = active ? '#eafff6' : '#0ff';
+    c.font = 'bold 21px monospace';
+    c.textAlign = 'center';
+    c.fillText(labels[b.id], b.x + b.w / 2, b.y + 27);
+    c.textAlign = 'left';
+  }
+}
+function hitButtonPx(px, py) {
+  for (const b of buttonRects()) {
+    if (px >= b.x && px <= b.x + b.w && py >= b.y && py <= b.y + b.h) return b.id;
+  }
+  return null;
+}
+function pressButton(id) {
+  if (id === 'music') {
+    musicMuted = !musicMuted;
+    realMusicMuted = musicMuted;
+    if (musicMuted) { musicStop(); stopRealMusic(); }
+    else if (state === 'play') playTrackForEra(era().year);
+    showMessage(musicMuted ? 'MUSIC OFF' : 'MUSIC ON', 1.4);
+  } else if (id === 'pause') {
+    if (state === 'play') { paused = true; musicStop(); stopRealMusic(); showMessage('PAUSED', 9999); }
+    else if (paused) { paused = false; if (!musicMuted) playTrackForEra(era().year); showMessage('', 0.01); }
+  } else if (id === 'quit') {
+    paused = false;
+    musicStop();
+    stopRealMusic();
+    clearBattlefield();
+    state = 'title'; score = 0; lives = START_LIVES; hull = HITS_PER_LIFE;
+    kills = 0; eraIndex = 0; loopCount = 0; credits = START_CREDITS;
+    yaw = 0; pitch = 0; bank = 0;
+    applyEra();
+    showMessage('FIRE TO START', 9999);
+  }
+}
+
+// ---------- Desktop input ----------
+const keys = {};
+addEventListener('keydown', e => { keys[e.code] = true; if (e.code === 'Space') e.preventDefault(); initAudio(); });
+addEventListener('keyup', e => { keys[e.code] = false; });
+let mouseDX = 0, mouseDY = 0, mouseDown = false;
+// --- Mouse: raycast onto the dashboard so a click lands where you are pointing ---
+const uiRay = new THREE.Raycaster();
+const uiNDC = new THREE.Vector2();
+function buttonUnderPointer(ev) {
+  const rect = renderer.domElement.getBoundingClientRect();
+  uiNDC.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
+  uiNDC.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
+  uiRay.setFromCamera(uiNDC, camera);
+  const hits = uiRay.intersectObject(hud, false);
+  if (!hits.length || !hits[0].uv) return null;
+  // UV runs 0..1 with v measured from the bottom, canvas rows run from the top
+  const px = hits[0].uv.x * hudCanvas.width;
+  const py = (1 - hits[0].uv.y) * hudCanvas.height;
+  return hitButtonPx(px, py);
+}
+renderer.domElement.addEventListener('click', (ev) => {
+  initAudio();
+  // A click on a dashboard button is a UI press, not a fire command
+  const hit = buttonUnderPointer(ev);
+  if (hit) { pressButton(hit); return; }
+  if (!renderer.xr.isPresenting && !document.pointerLockElement) renderer.domElement.requestPointerLock();
+});
+// Hovering a button highlights it, so it is obvious they are clickable
+renderer.domElement.addEventListener('mousemove', (ev) => {
+  if (document.pointerLockElement) return;
+  const hit = buttonUnderPointer(ev);
+  hoveredButton = hit;
+  renderer.domElement.style.cursor = hit ? 'pointer' : 'default';
+});
+addEventListener('mousemove', e => { if (document.pointerLockElement) { mouseDX += e.movementX; mouseDY += e.movementY; } });
+addEventListener('mousedown', () => { mouseDown = true; });
+addEventListener('mouseup', () => { mouseDown = false; });
+
+// ---------- Clouds ----------
+function radialTex(stops) {
+  const c = document.createElement('canvas'); c.width = c.height = 128;
+  const x = c.getContext('2d'), gr = x.createRadialGradient(64, 64, 0, 64, 64, 64);
+  for (const [o, col] of stops) gr.addColorStop(o, col);
+  x.fillStyle = gr; x.fillRect(0, 0, 128, 128);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+}
+function puffTex() {
+  const c = document.createElement('canvas'); c.width = c.height = 256;
+  const x = c.getContext('2d');
+  for (let i = 0; i < 30; i++) {
+    const r = 22 + Math.random() * 45, a = Math.random() * Math.PI * 2, d = Math.random() * (118 - r) * 0.85;
+    const px = 128 + Math.cos(a) * d, py = 128 + Math.sin(a) * d * 0.75;
+    const gr = x.createRadialGradient(px, py, 0, px, py, r);
+    gr.addColorStop(0, 'rgba(255,255,255,0.35)'); gr.addColorStop(1, 'rgba(255,255,255,0)');
+    x.fillStyle = gr; x.beginPath(); x.arc(px, py, r, 0, Math.PI * 2); x.fill();
+  }
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+}
+const puff = puffTex();
+const fireTex = radialTex([[0, 'rgba(255,255,240,1)'], [0.25, 'rgba(255,220,120,0.95)'], [0.55, 'rgba(255,110,20,0.5)'], [1, 'rgba(120,20,0,0)']]);
+const glowTex = radialTex([[0, 'rgba(255,255,255,1)'], [0.3, 'rgba(255,255,255,0.5)'], [1, 'rgba(255,255,255,0)']]);
+
+const CLOUD_R = 350;
+const cloudMat = new THREE.SpriteMaterial({ map: puff, color: 0xffffff, transparent: true, depthWrite: false, fog: true });
+const cloudShade = new THREE.SpriteMaterial({ map: puff, color: 0xc9d3de, transparent: true, depthWrite: false, fog: true });
+const clouds = [];
+for (let i = 0; i < 90; i++) {
+  const g = new THREE.Group();
+  const n = 5 + Math.floor(Math.random() * 4);
+  for (let j = 0; j < n; j++) {
+    const y = (Math.random() - 0.5) * 8;
+    const m = new THREE.Sprite(y < -1 ? cloudShade : cloudMat);
+    const s = 22 + Math.random() * 26;
+    m.scale.set(s * 1.3, s, 1);
+    m.position.set((Math.random() - 0.5) * 45, y, (Math.random() - 0.5) * 30);
+    m.material.rotation = Math.random() * 6;
+    g.add(m);
+  }
+  g.position.set((Math.random() * 2 - 1) * CLOUD_R, (Math.random() * 2 - 1) * CLOUD_R, (Math.random() * 2 - 1) * CLOUD_R);
+  scene.add(g); clouds.push(g);
+}
+
+// ---------- Distant mountain silhouettes ringing the horizon ----------
+// A closed ridge line around the player: layered peaks in two bands so the horizon
+// has real shape to read against, fading into the haze with distance.
+// ---------- Terrain: ground, coast, roads, fields and 3D mountains ----------
+const mountains = [];
+// The land below is a large textured plane: grass, fields, roads, beaches and sea.
+// Mountains are low-poly hills with wide bases and gentle profiles, not walls.
+
+// --- Texture helpers -------------------------------------------------------
+function noise2(x, y, seed) {
+  const s = Math.sin(x * 127.1 + y * 311.7 + seed * 74.7) * 43758.5453;
+  return s - Math.floor(s);
+}
+function smoothNoise(x, y, seed) {
+  const xi = Math.floor(x), yi = Math.floor(y);
+  const xf = x - xi, yf = y - yi;
+  const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+  const a = noise2(xi, yi, seed), b = noise2(xi + 1, yi, seed);
+  const c = noise2(xi, yi + 1, seed), d = noise2(xi + 1, yi + 1, seed);
+  return (a * (1 - u) + b * u) * (1 - v) + (c * (1 - u) + d * u) * v;
+}
+function fbm(x, y, seed, oct) {
+  let sum = 0, amp = 1, norm = 0;
+  for (let o = 0; o < oct; o++) {
+    sum += smoothNoise(x * Math.pow(2, o), y * Math.pow(2, o), seed + o * 13) * amp;
+    norm += amp; amp *= 0.5;
+  }
+  return sum / norm;
+}
+
+// The ground painted in one pass: grass, ploughed fields, roads, a river, a
+// coastline with sand, then shallow and deep sea beyond it.
+// The ground painted in one pass: irregular field patchwork with crop rows,
+// woodland, hedge-lined lanes, a river, a wide beach and a tidier sea.
+// The landscape below: farmland with hedgerows, wooded hills, lakes, rivers and a
+// road network laid across it. Painted once into a texture and mapped over the ground.
+function groundTexture(size, seed) {
+  const c = document.createElement('canvas'); c.width = c.height = size;
+  const g = c.getContext('2d');
+  const img = g.createImageData(size, size);
+  const d = img.data;
+
+  // Large-scale terrain type: where the hills are, where the lowlands are.
+  const hills = (x, y) => fbm(x / 300, y / 300, seed + 3, 3);
+  // Lakes: blobs where a second noise field rises above a threshold.
+  const lakes = (x, y) => fbm(x / 190, y / 190, seed + 71, 4);
+  // Field patchwork: small blocks of different crops.
+  const patch = (x, y) => fbm(x / 70, y / 70, seed + 9, 3);
+  // Woodland clusters.
+  const wood = (x, y) => fbm(x / 120, y / 120, seed + 31, 3);
+  const fine = (x, y) => fbm(x / 18, y / 18, seed, 4);
+  // A road grid: two families of wavy lines crossing the map.
+  const roadA = (x, y) => Math.abs((y - size * 0.35 - size * 0.10 * Math.sin(x / 210)) % (size * 0.24)) < 4;
+  const roadB = (x, y) => Math.abs((x - size * 0.28 - size * 0.09 * Math.cos(y / 180)) % (size * 0.31)) < 4;
+
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const i = (y * size + x) * 4;
+      const n = fine(x, y);
+      const h = hills(x, y), lk = lakes(x, y), p = patch(x, y), w = wood(x, y);
+      let r, gg, b;
+
+      if (lk > 0.66) {
+        // Lake: depth shading from a pale shore into deep blue-green
+        const depth = Math.min(1, (lk - 0.66) / 0.30);
+        r = 66 + (1 - depth) * 60 + n * 6;
+        gg = 108 + (1 - depth) * 52 + n * 6;
+        b = 122 + (1 - depth) * 40 + n * 6;
+        if (depth < 0.12) { r += 40; gg += 40; b += 26; }   // shallows
+      } else if (w > 0.60 && h > 0.45) {
+        // Wooded hills: darker green, with slope shading from the hill field
+        const shade = 0.78 + (h - 0.45) * 0.5 + n * 0.16;
+        r = 52 * shade; gg = 84 * shade; b = 46 * shade;
+      } else if (h > 0.58) {
+        // Open hills: dry grass, lighter on the tops, darker in the folds
+        const shade = 0.86 + n * 0.24 - Math.abs(h - 0.7) * 0.3;
+        r = 132 * shade; gg = 138 * shade; b = 84 * shade;
+      } else {
+        // Farmland: irregular patches of different crops with plough lines
+        const px = Math.floor(x / 42 + p * 26), py = Math.floor(y / 42 + p * 26);
+        const crop = noise2(px, py, seed + 21);
+        if (crop < 0.28) { r = 96; gg = 130; b = 60; }        // pasture
+        else if (crop < 0.50) { r = 136; gg = 148; b = 78; }  // meadow
+        else if (crop < 0.70) { r = 154; gg = 132; b = 90; }  // ploughed
+        else if (crop < 0.86) { r = 104; gg = 116; b = 68; }  // dark crops
+        else { r = 172; gg = 160; b = 98; }                   // ripe crop
+        const shade = 0.88 + n * 0.24;
+        r *= shade; gg *= shade; b *= shade;
+        if (crop >= 0.50 && crop < 0.70) {                     // plough lines
+          if (Math.sin((x * 0.9 + y * 0.35) * 0.6) > 0.55) { r *= 0.9; gg *= 0.9; b *= 0.88; }
+        }
+        // hedgerows on the patch boundaries
+        const ex = (x / 42 + p * 26) % 1, ey = (y / 42 + p * 26) % 1;
+        if (ex < 0.04 || ey < 0.04) { r *= 0.6; gg *= 0.68; b *= 0.6; }
+      }
+
+      // Roads: pale surface with darker verges, drawn over whatever they cross
+      if (roadA(x, y) || roadB(x, y)) {
+        r = 98; gg = 94; b = 88;
+      } else if (
+        Math.abs((y - size * 0.35 - size * 0.10 * Math.sin(x / 210)) % (size * 0.24)) < 8 ||
+        Math.abs((x - size * 0.28 - size * 0.09 * Math.cos(y / 180)) % (size * 0.31)) < 8) {
+        r *= 0.8; gg *= 0.8; b *= 0.8;
+      }
+
+      d[i] = Math.max(0, Math.min(255, r));
+      d[i + 1] = Math.max(0, Math.min(255, gg));
+      d[i + 2] = Math.max(0, Math.min(255, b));
+      d[i + 3] = 255;
+    }
+  }
+  g.putImageData(img, 0, 0);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.wrapS = t.wrapT = THREE.ClampToEdgeWrapping;
+  t.anisotropy = 4;
+  return t;
+}
+const GROUND_R = 6000;   // wide enough that you never reach the edge
+const groundTex = groundTexture(1024, 4.2);
+const groundMat = new THREE.MeshStandardMaterial({
+  map: groundTex, roughness: 0.95, metalness: 0.0, fog: true,
+});
+// Displace the ground into real terrain. The plane is subdivided into a grid and each
+// vertex is lifted by the same hill field the texture uses, so the land has shape:
+// slopes catch the sun, hollows fall into shadow, and flying over it reads as flying.
+const GRID = 200;                       // 200x200 quads across the whole ground
+const groundGeo = new THREE.PlaneGeometry(GROUND_R * 2, GROUND_R * 2, GRID, GRID);
+{
+  const pos = groundGeo.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i), y = pos.getY(i);      // plane is XY before rotation
+    // world-space position once the plane is laid flat
+    const u = (x + GROUND_R) / (GROUND_R * 2);
+    const v = (y + GROUND_R) / (GROUND_R * 2);
+    const px = u * 1024, py = v * 1024;
+    // the same two fields the texture paints from: hills, and open ground relief
+    const h = fbm(px / 300, py / 300, 3 + 4.2, 3);
+    const ridge = fbm(px / 620, py / 620, 4.2 + 88, 2);
+    const detail = fbm(px / 60, py / 60, 4.2 + 12, 3);
+    // lift only where the hill field is strong, so lowlands stay flat and lakes sit low
+    const lift = Math.max(0, h - 0.42) * 62 + Math.max(0, ridge - 0.55) * 90 + (detail - 0.5) * 7;
+    pos.setZ(i, lift);
+  }
+  groundGeo.computeVertexNormals();
+}
+const ground = new THREE.Mesh(groundGeo, groundMat);
+ground.rotation.x = -Math.PI / 2;
+const GROUND_Y = -170;                 // the surface you must not fly into
+ground.position.y = GROUND_Y;
+ground.renderOrder = -3;
+scene.add(ground);
+
+// --- Mountains: low, wide and rounded, so they read as hills not walls --------
+function ridgeHeight(angle, seed) {
+  let h = 0, amp = 1, freq = 2.2, norm = 0;
+  for (let o = 0; o < 4; o++) {
+    const x = angle * freq;
+    const i = Math.floor(x), f = x - i;
+    const u = f * f * (3 - 2 * f);
+    const n = noise2(i, seed, o) * (1 - u) + noise2(i + 1, seed, o) * u;
+    h += n * amp;
+    norm += amp; amp *= 0.55; freq *= 1.9;
+  }
+  return h / norm;
+}
+// ---------- Traffic: cars driving the roads ----------
+// Small boxes that travel the two road families, wrapping around when they pass the edge.
+const cars = [];
+const carMats = [
+  new THREE.MeshStandardMaterial({ color: 0xb43a30, roughness: 0.5, metalness: 0.4 }),
+  new THREE.MeshStandardMaterial({ color: 0x2b4c8c, roughness: 0.5, metalness: 0.4 }),
+  new THREE.MeshStandardMaterial({ color: 0xdedede, roughness: 0.5, metalness: 0.4 }),
+  new THREE.MeshStandardMaterial({ color: 0x2a2a2a, roughness: 0.5, metalness: 0.4 }),
+  new THREE.MeshStandardMaterial({ color: 0x2f7a4a, roughness: 0.5, metalness: 0.4 }),
+];
+const carGeo = new THREE.BoxGeometry(5, 2.6, 11);     // metres, read from the air
+for (let i = 0; i < 54; i++) {
+  const m = new THREE.Mesh(carGeo, carMats[i % carMats.length]);
+  scene.add(m);
+  cars.push({
+    mesh: m,
+    alongA: i % 2 === 0,
+    lane: (Math.random() < 0.5 ? 1 : -1) * 5,
+    pos: Math.random() * GROUND_R * 2 - GROUND_R,
+    speed: (26 + Math.random() * 30) * (Math.random() < 0.5 ? 1 : -1),
+  });
+}
+function roadLineA(x) { return GROUND_R * 0.35 + GROUND_R * 0.10 * Math.sin(x / (GROUND_R / 8)); }
+function roadLineB(y) { return GROUND_R * 0.28 + GROUND_R * 0.09 * Math.cos(y / (GROUND_R / 9)); }
+function updateCars(dt) {
+  for (const c of cars) {
+    c.pos += c.speed * dt;
+    if (c.pos > GROUND_R) c.pos -= GROUND_R * 2;
+    else if (c.pos < -GROUND_R) c.pos += GROUND_R * 2;
+    if (c.alongA) {
+      c.mesh.position.set(c.pos, GROUND_Y + 1.6, roadLineA(c.pos) + c.lane);
+      c.mesh.rotation.y = c.speed >= 0 ? 0 : Math.PI;
+    } else {
+      c.mesh.position.set(roadLineB(c.pos) + c.lane, GROUND_Y + 1.6, c.pos);
+      c.mesh.rotation.y = c.speed >= 0 ? Math.PI / 2 : -Math.PI / 2;
+    }
+  }
+}
+
+// Smooth-shaded rock: no facets, so the ranges read as landform rather than cutouts
+const hillMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.96, metalness: 0, fog: true });
+const hillMat2 = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.96, metalness: 0, fog: true });
+const hillMat3 = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1.0, metalness: 0, fog: true });
+
+// Colour rock by height and steepness: grass on the gentle low ground, bare rock on
+// the steep faces, snow only on the true summits. This is what makes a range read
+// as a mountain instead of a grey lump.
+function paintTerrain(geo, height, baseY, snowAt) {
+  const pos = geo.attributes.position;
+  const nrm = geo.attributes.normal;
+  const colors = [];
+  const grass = new THREE.Color(0x5c6f42);
+  const rockDark = new THREE.Color(0x51473c);
+  const rockLight = new THREE.Color(0x8a8073);
+  const snow = new THREE.Color(0xf2f6fa);
+  for (let i = 0; i < pos.count; i++) {
+    const y = pos.getY(i);
+    const up = Math.abs(nrm.getY(i));                 // 1 = flat, 0 = vertical face
+    const alt = (y - baseY) / Math.max(1, height);
+    const c = grass.clone();
+    // steeper faces turn to bare rock
+    const steep = 1 - Math.min(1, up * 1.4);
+    c.lerp(rockDark.clone().lerp(rockLight, Math.min(1, alt * 1.3)), steep * 0.92);
+    // the tops go pale, then snow above the snow line
+    if (snowAt !== null) {
+      const t = Math.max(0, Math.min(1, (alt - snowAt) / 0.28));
+      c.lerp(snow, t * t * (0.55 + 0.45 * up));
+    }
+    colors.push(c.r, c.g, c.b);
+  }
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+}
+const D = Math.PI / 180;
+
+// Each entry is a wedge of the compass in degrees. The gaps between them are open
+function ridgeProfile(t, seed) {
+  let h = 0, amp = 1, freq = 2.4, norm = 0;
+  for (let o = 0; o < 5; o++) {
+    const x = t * freq;
+    const i = Math.floor(x), f = x - i;
+    const u = f * f * (3 - 2 * f);
+    const n = noise2(i, seed, o) * (1 - u) + noise2(i + 1, seed, o) * u;
+    h += n * amp;
+    norm += amp; amp *= 0.55; freq *= 2.3;
+  }
+  return h / norm;
+}
+// How deeply gullies bite into the flank, varying along the ridge so spurs alternate
+function gullyAt(t, seed) {
+  return 0.10 + 0.42 * ridgeProfile(t * 1.7 + 0.21, seed + 61);
+}
+// Real mountain form: a ridgeline of peaks and passes, eroded flanks with gullies,
+// and uneven scree spread at the base. That is what stops it reading as one cake.
+function massifGeo(radius, height, seed, rows, baseY, a0, a1) {
+  const segs = 96;
+  const verts = [], idx = [];
+  for (let r = 0; r <= rows; r++) {
+    const depth = r / rows;                      // 0 at the crest, 1 at the base
+    for (let i = 0; i <= segs; i++) {
+      const t = i / segs;
+      const ang = a0 + t * (a1 - a0);
+      const base = ridgeProfile(t, seed);
+      const spikes = ridgeProfile(t * 2.6, seed + 17);
+      const ends = Math.pow(Math.sin(t * Math.PI), 0.55);   // fades out at the ends
+      const crest = height * (0.28 + base * 0.62 + spikes * 0.26) * ends;
+      // the flank is not one even curve: gullies cut into it, deeper in places
+      const gully = gullyAt(t, seed);
+      const shape = Math.pow(depth, 1.35);                  // steepest near the top
+      const cut = shape * (1 - gully * Math.sin(depth * Math.PI));
+      const y = crest * (1 - cut) + baseY * cut;
+      // scree fans and spurs reach further out in some places than others
+      const spread = 0.10 + 0.22 * ridgeProfile(t * 3.1 + 0.6, seed + 33);
+      const rr = radius * (1 + spread * (1 - shape));
+      verts.push(Math.cos(ang) * rr, y, Math.sin(ang) * rr);
+    }
+  }
+  for (let r = 0; r < rows; r++) {
+    for (let i = 0; i < segs; i++) {
+      const a0i = r * (segs + 1) + i, b0i = a0i + 1;
+      const a1i = (r + 1) * (segs + 1) + i, b1i = a1i + 1;
+      idx.push(a0i, a1i, b0i, b0i, a1i, b1i);
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  return g;
+}
+
+function addMassif(radius, height, seed, rows, mat, snowAt, a0, a1) {
+  const baseY = GROUND_Y;
+  const geo = massifGeo(radius, height, seed, rows, baseY, a0 * D, a1 * D);
+  // One mesh, coloured by height and steepness: grass, rock, snow. Cheaper than the
+  // old two-mesh approach and far more convincing than a single flat colour.
+  paintTerrain(geo, height, baseY, snowAt);
+  const mesh = new THREE.Mesh(geo, mat);
+  scene.add(mesh); mountains.push(mesh);
+}
+
+// Near hills: two separate masses, with open country between them
+// The ranges, recorded so the collision test can ask where the rock is
+const MASSIF_RANGES = [
+  { outer: 900, inner: 620, height: 112, seed: 3.7, baseY: GROUND_Y, a0: -148 * D, a1: -74 * D },
+  { outer: 900, inner: 620, height: 124, seed: 8.1, baseY: GROUND_Y, a0: 26 * D, a1: 96 * D },
+  { outer: 1300, inner: 940, height: 172, seed: 11.3, baseY: GROUND_Y, a0: -84 * D, a1: -18 * D },
+  { outer: 1300, inner: 940, height: 158, seed: 17.5, baseY: GROUND_Y, a0: 128 * D, a1: 178 * D },
+  { outer: 1680, inner: 1300, height: 205, seed: 23.9, baseY: GROUND_Y, a0: 40 * D, a1: 118 * D },
+];
+addMassif(760, 112, 3.7, 10, hillMat, 0.72, -148, -74);   // behind-left
+addMassif(760, 124, 8.1, 10, hillMat, 0.70, 26, 96);      // right
+// Mid range: one broad mass off to the side, one behind
+addMassif(1120, 172, 11.3, 9, hillMat2, 0.62, -84, -18);
+addMassif(1120, 158, 17.5, 9, hillMat2, 0.66, 128, 178);
+// Far range: pale, low, and only across part of the horizon
+addMassif(1480, 205, 23.9, 8, hillMat3, null, 40, 118);
+
+// ---------- Aircraft meshes ----------
+const roundelTex = (() => {
+  const c = document.createElement('canvas'); c.width = c.height = 64;
+  const x = c.getContext('2d');
+  [['#f4f1e6', 31], ['#b8262d', 24], ['#f4f1e6', 15], ['#1d3c8f', 8]].forEach(([col, r]) => {
+    x.fillStyle = col; x.beginPath(); x.arc(32, 32, r, 0, Math.PI * 2); x.fill();
+  });
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+})();
+const roundelMat = new THREE.MeshStandardMaterial({ map: roundelTex, transparent: true, roughness: 0.6, polygonOffset: true, polygonOffsetFactor: -2 });
+
+// ---------- Game state ----------
+const START_LIVES = 5;
+const START_CREDITS = 2;
+const HITS_PER_LIFE = 3;
+let state = 'title', score = 0, lives = START_LIVES, hull = HITS_PER_LIFE, kills = 0, invuln = 0, stateTimer = 0, flashRestoreAt = 0;
+let credits = START_CREDITS, lastEraIndex = 0, lastLoopCount = 0;
+let yaw = 0, pitch = 0, bank = 0, fireCool = 0, message = 'FIRE TO START', messageTimer = 9999;
+const PLAYER_SPEED = 35;
+const enemies = [], bullets = [], particles = [];
+let boss = null;
+
+const tmpV = new THREE.Vector3(), tmpQ = new THREE.Quaternion();
+const playerVel = new THREE.Vector3();
+const headPos = new THREE.Vector3();
+
+function showMessage(text, t = 3) { message = text; messageTimer = t; }
+
+function applyEra() {
+  const e = era();
+  skyU.top.value.setHex(e.top); skyU.horizon.value.setHex(e.horizon); skyU.bottom.value.setHex(e.bottom);
+  skyU.sunColor.value.setHex(e.sun); skyU.sunDir.value.set(...e.sunDir).normalize();
+  scene.fog.color.setHex(e.horizon);
+  sun.color.setHex(e.sun); sun.position.copy(skyU.sunDir.value).multiplyScalar(100);
+  hemi.color.setHex(e.horizon); hemi.groundColor.setHex(e.bottom);
+  cloudMat.color.setHex(e.cloud); cloudShade.color.setHex(e.shade);
+}
+
+function clearBattlefield() {
+  for (const e of enemies) scene.remove(e.mesh);
+  enemies.length = 0;
+  if (boss) { scene.remove(boss.mesh); boss = null; }
+  for (const b of bullets) { b.alive = false; b.mesh.visible = false; }
+  clearFxQueue(); flashRestoreAt = 0;
+  yaw = 0; pitch = 0; bank = 0; player.position.set(0, 0, 0);
+  invuln = 2;
+}
+// A brand new campaign: fresh score, five lives, the first era, two credits in the bank
+function newCampaign() {
+  clearBattlefield();
+  score = 0; lives = START_LIVES; hull = HITS_PER_LIFE; kills = 0; eraIndex = 0; loopCount = 0; credits = START_CREDITS;
+  applyEra(); state = 'play';
+  playTrackForEra(era().year);
+  showMessage('ERA ' + era().year, 3);
+}
+// Picking up where you died: era, score and kill count are kept, one credit is spent
+function continueCampaign() {
+  clearBattlefield();
+  eraIndex = lastEraIndex; loopCount = lastLoopCount;
+  lives = START_LIVES; hull = HITS_PER_LIFE; kills = 0; credits--;
+  applyEra(); state = 'play';
+  playTrackForEra(era().year);
+  showMessage('CONTINUE >> ERA ' + era().year, 3);
+  sfxWarp();
+}
+
+// ---------- Bullets ----------
+const bGeo = new THREE.CylinderGeometry(0.07, 0.07, 2.6, 6).rotateX(Math.PI / 2);
+const hGeo = new THREE.CylinderGeometry(0.28, 0.28, 3.4, 8).rotateX(Math.PI / 2);
+const pbMat = new THREE.MeshBasicMaterial({ color: 0xfff8d0, toneMapped: false });
+const ebMat = new THREE.MeshBasicMaterial({ color: 0xffc0b0, toneMapped: false });
+const haloOpts = { transparent: true, opacity: 0.45, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false };
+const phMat = new THREE.MeshBasicMaterial({ color: 0xffaa22, ...haloOpts });
+const ehMat = new THREE.MeshBasicMaterial({ color: 0xff2200, ...haloOpts });
+function spawnBullet(pos, vel, enemy) {
+  let b = bullets.find(b => !b.alive);
+  if (!b) {
+    b = { mesh: new THREE.Mesh(bGeo, pbMat), vel: new THREE.Vector3() };
+    b.halo = new THREE.Mesh(hGeo, phMat); b.mesh.add(b.halo);
+    scene.add(b.mesh); bullets.push(b);
+  }
+  b.alive = true; b.enemy = enemy; b.life = enemy ? 5 : 2.5;
+  b.mesh.visible = true; b.mesh.material = enemy ? ebMat : pbMat; b.halo.material = enemy ? ehMat : phMat;
+  b.mesh.position.copy(pos); b.vel.copy(vel);
+  b.mesh.lookAt(tmpV.copy(pos).add(vel));
+}
+
+// A handful of effects per frame instead of all at once
+const fxQueue = [];
+function queueExplosion(pos, size, at) { fxQueue.push({ pos: pos.clone(), size, at }); }
+function updateFxQueue(now) {
+  for (let i = fxQueue.length - 1; i >= 0; i--) {
+    if (fxQueue[i].at <= now) { const q = fxQueue.splice(i, 1)[0]; explode(q.pos, q.size); }
+  }
+}
+function clearFxQueue() { fxQueue.length = 0; }
+
+// ---------- Explosions ----------
+// Explosions animate on their own timers, so however heavy a frame gets, every
+// sprite is still removed and every material still disposed
+function explode(pos, size) {
+  sfxBoom(pos, size);
+  const born = performance.now();
+  const heavy = size > 1.5;
+  // Everything is scaled up hard: blasts should fill the sky, not puff politely.
+  const K = heavy ? 3.4 : 2.4;
+
+  // 1. fireball core: several stacked spheres of light
+  const cores = heavy ? 5 : 3;
+  for (let c = 0; c < cores; c++) {
+    const cm = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: fireTex, color: c === 0 ? 0xfff8e0 : c % 2 ? 0xffc255 : 0xff8a20,
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false }));
+    cm.position.copy(pos);
+    cm.position.x += (Math.random() - 0.5) * size * 3;
+    cm.position.y += (Math.random() - 0.5) * size * 3;
+    cm.position.z += (Math.random() - 0.5) * size * 3;
+    const sc = (heavy ? 12 : 8) * size * (1 - c * 0.1);
+    cm.scale.setScalar(sc);
+    scene.add(cm);
+    particles.push({ mesh: cm, vel: new THREE.Vector3().randomDirection().multiplyScalar(3 * size),
+      life: 0.6 + Math.random() * 0.3, born, last: born, startScale: sc, smoke: false, grow: 1.5 });
+  }
+
+  // 2. shockwave ring, now wide enough to read across the whole view
+  const ring = new THREE.Mesh(new THREE.RingGeometry(0.7, 1.0, 40),
+    new THREE.MeshBasicMaterial({ color: 0xffe2b0, transparent: true, opacity: 0.8,
+      side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false }));
+  ring.position.copy(pos);
+  ring.lookAt(camera.getWorldPosition(new THREE.Vector3()));
+  scene.add(ring);
+  particles.push({ mesh: ring, vel: new THREE.Vector3(), life: 0.6, born, last: born,
+    startScale: size * 10, smoke: false, grow: 9.0 });
+
+  // 3. rolling fire and smoke cloud, big and slow
+  const n = Math.floor((heavy ? 34 : 22) * size) + 14;
+  for (let k = 0; k < n; k++) {
+    const smoke = k % 3 === 0;
+    const mat = new THREE.SpriteMaterial(smoke
+      ? { map: puff, color: k % 6 === 0 ? 0x141414 : 0x333333, transparent: true, depthWrite: false, opacity: 0.9 }
+      : { map: fireTex, color: k % 2 ? 0xff8a10 : 0xffdd90, transparent: true, depthWrite: false,
+          blending: THREE.AdditiveBlending, toneMapped: false });
+    const m = new THREE.Sprite(mat);
+    m.position.copy(pos);
+    m.scale.setScalar((smoke ? 9 : 6) * size * K * 0.5);
+    scene.add(m);
+    const vel = new THREE.Vector3().randomDirection().multiplyScalar((6 + Math.random() * (smoke ? 10 : 24)) * size);
+    particles.push({ mesh: m, vel, life: smoke ? 2.8 : 1.5, born, last: born,
+      startScale: (smoke ? 9 : 6) * size * K * 0.5, smoke, grow: smoke ? 2.4 : 1.6 });
+  }
+
+  // 4. sparks: long fast streaks thrown clear of the blast
+  for (let k = 0; k < Math.floor(26 * size); k++) {
+    const sm = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: glowTex, color: k % 3 ? 0xfff0b0 : 0xffc060, transparent: true, depthWrite: false,
+      blending: THREE.AdditiveBlending, toneMapped: false }));
+    sm.position.copy(pos);
+    sm.scale.setScalar(0.9 * size);
+    scene.add(sm);
+    const vel = new THREE.Vector3().randomDirection().multiplyScalar((26 + Math.random() * 46) * size);
+    particles.push({ mesh: sm, vel, life: 0.85, born, last: born, startScale: 0.9 * size, smoke: false, grow: 0.5 });
+  }
+
+  // 5. heavy tumbling wreckage
+  for (let k = 0; k < (heavy ? 16 : 8); k++) {
+    const d = new THREE.Mesh(new THREE.BoxGeometry(0.9 * size, 0.4 * size, 0.6 * size),
+      new THREE.MeshStandardMaterial({ color: 0x3a3a3a, metalness: 0.75, roughness: 0.55 }));
+    d.position.copy(pos);
+    scene.add(d);
+    const vel = new THREE.Vector3().randomDirection().multiplyScalar((14 + Math.random() * 22) * size);
+    vel.y += 6 * size;
+    particles.push({ mesh: d, vel, life: 2.4, born, last: born, startScale: 1, smoke: false,
+      grow: 1, spin: new THREE.Vector3(Math.random() * 8 - 4, Math.random() * 8 - 4, Math.random() * 8 - 4) });
+  }
+
+  // 6. a long mushrooming smoke column that drifts and swells
+  for (let k = 0; k < (heavy ? 12 : 6); k++) {
+    const sm = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: puff, color: 0x1c1c1c, transparent: true, depthWrite: false, opacity: 0.75 }));
+    sm.position.copy(pos);
+    sm.position.y += k * 1.6 * size;
+    sm.scale.setScalar((7 + k * 1.4) * size);
+    scene.add(sm);
+    particles.push({ mesh: sm, vel: new THREE.Vector3(0, 3 + Math.random() * 3, 0).multiplyScalar(size),
+      life: 3.4, born, last: born, startScale: (7 + k * 1.4) * size, smoke: true, grow: 1.9 });
+  }
+
+  // 7. the blinding flash
+  const fl = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTex, color: 0xfff0c0,
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false }));
+  fl.position.copy(pos);
+  fl.scale.setScalar((heavy ? 60 : 34) * size);
+  scene.add(fl);
+  particles.push({ mesh: fl, vel: new THREE.Vector3(), life: 0.45, born, last: born,
+    startScale: (heavy ? 60 : 34) * size, smoke: false, grow: 0.7 });
+}
+
+// Hard guarantee nothing is ever left behind, whatever the frame rate did
+function updateParticles(now) {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const pt = particles[i];
+    const age = (now - pt.born) / 1000;
+    if (age >= pt.life) { removeParticle(i); continue; }
+    const dt = Math.min(0.05, Math.max(0, (now - pt.last) / 1000));
+    pt.last = now;
+    pt.vel.multiplyScalar(1 - (pt.smoke ? 1.5 : 3.5) * dt);
+    if (!pt.smoke) pt.vel.y -= 6 * dt;                 // fire and sparks fall away
+    pt.mesh.position.addScaledVector(pt.vel, dt);
+    const fade = Math.max(0, 1 - age / pt.life);
+    pt.mesh.material.opacity = fade * (pt.smoke ? 0.85 : 1);
+    pt.mesh.scale.setScalar(pt.startScale * (1 + age * (pt.grow || 1.5)));
+    if (pt.spin) {
+      pt.mesh.rotation.x += pt.spin.x * dt;
+      pt.mesh.rotation.y += pt.spin.y * dt;
+      pt.mesh.rotation.z += pt.spin.z * dt;
+    }
+  }
+}
+function removeParticle(i) {
+  const pt = particles[i];
+  scene.remove(pt.mesh);
+  pt.mesh.material.dispose();
+  particles.splice(i, 1);
+}
+
+// ---------- Enemies ----------
+function spawnEnemy() {
+  const dir = new THREE.Vector3().randomDirection();
+  dir.y *= 0.5;
+  const pos = player.position.clone().addScaledVector(dir.normalize(), 220 + Math.random() * 60);
+  const mesh = makeAircraft(era().shape, era().color, 1);
+  mesh.position.copy(pos); scene.add(mesh);
+  enemies.push({
+    mesh, dir: player.position.clone().sub(pos).normalize(),
+    offset: new THREE.Vector3().randomDirection().multiplyScalar(15 + Math.random() * 25),
+    speed: era().speed * (1 + loopCount * 0.25) * (0.85 + Math.random() * 0.3),
+    cool: 2 + Math.random() * 2, radius: 3,
+  });
+}
+
+function spawnBoss() {
+  const shape = era().shape === 'saucer' ? 'saucer' : 'prop';
+  const mesh = makeAircraft(shape, 0x553333, 5);
+  const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(player.quaternion);
+  mesh.position.copy(player.position).addScaledVector(fwd, 260);
+  scene.add(mesh);
+  boss = { mesh, dir: fwd.clone().negate(), hp: 30 + loopCount * 10, maxHp: 30 + loopCount * 10, cool: 3, angle: 0,
+    speed: era().speed * 0.8, radius: 13 };
+  showMessage('WARNING: BOSS', 3);
+  sfxAlarm(4, 620, 300);
+  music.beat = 0;
+}
+
+function steerAndMove(e, target, turn, dt) {
+  tmpV.copy(target).sub(e.mesh.position).normalize();
+  e.dir.lerp(tmpV, Math.min(1, turn * dt)).normalize();
+  e.mesh.position.addScaledVector(e.dir, e.speed * dt);
+  e.mesh.lookAt(tmpV.copy(e.mesh.position).sub(e.dir));
+  e.mesh.traverse(o => { if (o.userData.prop) o.rotation.z += dt * 40; });
+}
+
+function enemyFire(from, spread, speed) {
+  const lead = headPos.clone().addScaledVector(playerVel, 0.8);
+  const d = lead.sub(from).normalize();
+  d.x += (Math.random() - 0.5) * spread; d.y += (Math.random() - 0.5) * spread; d.z += (Math.random() - 0.5) * spread;
+  spawnBullet(from, d.normalize().multiplyScalar(speed), true);
+}
+
+function hitPlayer() {
+  if (invuln > 0 || state !== 'play') return;
+  // Three hits per life: the hull takes the damage first, then a life is lost
+  hull--;
+  invuln = hull > 0 ? 1.4 : 2.5;
+  flash.material.opacity = hull > 0 ? 0.35 : 0.6;
+  sfxDamage();
+  const hitPos = headPos.clone().add(new THREE.Vector3(0, -2, -4).applyQuaternion(player.quaternion));
+  explode(hitPos, hull > 0 ? 0.6 : 1);
+  if (hull > 0) return;
+  hull = HITS_PER_LIFE;
+  lives--;
+  if (lives <= 0) {
+    lastEraIndex = eraIndex; lastLoopCount = loopCount;
+    state = 'over'; stateTimer = 1.5;
+    sfxAlarm(3, 400, 120);
+    musicStop();
+    stopRealMusic();
+    showMessage(credits > 0 ? 'GAME OVER - FIRE TO CONTINUE' : 'GAME OVER - FIRE FOR NEW GAME', 9999);
+  }
+}
+
+// Each wreck only makes a small puff, so a whole wave dying at once cannot swamp the frame
+function killEnemy(i) {
+  const e = enemies[i];
+  explode(e.mesh.position, 0.8);
+  scene.remove(e.mesh); enemies.splice(i, 1);
+  score += 100 * (eraIndex + 1); kills++;
+}
+
+
+// ---------- Warp jump: the sky stretches into soft streaks of light ----------
+let warp = null;
+const WARP_MS = 6200;
+function startWarp(toYear) {
+  // Star streaks drawn as soft glowing sprites, not thin meshes, so nothing reads
+  // as wireframe: each is a light with a falloff, stretched along its own path.
+  const streakTex = (() => {
+    const cc = document.createElement('canvas'); cc.width = 256; cc.height = 16;
+    const g = cc.getContext('2d');
+    const lin = g.createLinearGradient(0, 0, 256, 0);
+    lin.addColorStop(0, 'rgba(255,255,255,0)');
+    lin.addColorStop(0.55, 'rgba(200,230,255,0.55)');
+    lin.addColorStop(0.85, 'rgba(255,255,255,1)');
+    lin.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = lin; g.fillRect(0, 0, 256, 16);
+    const t = new THREE.CanvasTexture(cc); t.colorSpace = THREE.SRGBColorSpace; return t;
+  })();
+  const streaks = [];
+  for (let i = 0; i < 300; i++) {
+    const dir = new THREE.Vector3().randomDirection();
+    const mat = new THREE.SpriteMaterial({
+      map: streakTex, color: i % 5 === 0 ? 0xa8d4ff : 0xffffff,
+      transparent: true, opacity: 0,
+      blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false });
+    const m = new THREE.Sprite(mat);
+    const startDist = 16 + Math.random() * 240;
+    m.position.copy(dir).multiplyScalar(startDist);
+    m.visible = false;
+    // a sprite cannot be told to stretch, so it is scaled wide and thin and then
+    // rotated to lie along its own direction of travel
+    m.material.rotation = 0;
+    player.add(m);
+    streaks.push({ mesh: m, dir, start: startDist, spin: (Math.random() - 0.5) * 0.4, phase: Math.random() });
+  }
+  // A soft light tunnel: concentric glow rings made of sprites, no hard edges
+  const rings = [];
+  for (let i = 0; i < 16; i++) {
+    const rm = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: glowTex, color: i % 3 === 0 ? 0x9fd0ff : 0x5f90e0, transparent: true, opacity: 0,
+      blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false }));
+    rm.scale.setScalar(120);
+    rm.position.set(0, 0, -i * 110);
+    rm.visible = false;
+    player.add(rm);
+    rings.push(rm);
+  }
+  const core = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: glowTex, color: 0xcfeaff, transparent: true, opacity: 0,
+    blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false }));
+  core.scale.setScalar(1);
+  player.add(core);
+  const veil = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: glowTex, color: 0xdfeeff, transparent: true, opacity: 0,
+    blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false }));
+  veil.scale.setScalar(1400);
+  player.add(veil);
+  warp = { t: 0, streaks, core, rings, veil, toYear, switched: false, spun: 0 };
+  flash.material.color.setHex(0xffffff); flash.material.opacity = 0;
+  showMessage('ENGAGING TIME WARP', 2.6);
+}
+function updateWarp(dt) {
+  if (!warp) return;
+  warp.t += dt * 1000;
+  const p = Math.min(1, warp.t / WARP_MS);
+  const rush = p < 0.32 ? Math.pow(p / 0.32, 1.8)
+             : p < 0.7  ? 1
+             : Math.max(0, 1 - Math.pow((p - 0.7) / 0.3, 1.6));
+  const fade = p < 0.1 ? p / 0.1 : p > 0.9 ? Math.max(0, 1 - (p - 0.9) / 0.1) : 1;
+
+  if (!warp.switched && p >= 0.52) {
+    warp.switched = true;
+    applyEra();
+    showMessage('TIME WARP >> ' + era().year, 2.6);
+    sfxWarp();
+    playTrackForEra(era().year);
+  }
+
+  for (const st of warp.streaks) {
+    const m = st.mesh;
+    m.visible = rush > 0.02;
+    if (!m.visible) continue;
+    const travel = rush * 330;
+    m.position.copy(st.dir).multiplyScalar(st.start * (1 + rush * 0.5) + travel);
+    // scale the sprite long along one axis and rotate it to match its travel path
+    const len = 6 + rush * 150;
+    m.scale.set(len, 1.4 + rush * 5, 1);
+    const toCentre = st.dir.clone().negate();
+    const ang = Math.atan2(-toCentre.y, Math.hypot(toCentre.x, toCentre.z));
+    m.material.rotation = Math.atan2(toCentre.x, toCentre.z) * 0.35 + st.spin + ang * 0.4;
+    m.material.opacity = (0.1 + fade * 0.75) * (0.5 + rush * 0.5);
+  }
+
+  const ringSpeed = 1050;
+  for (const r of warp.rings) {
+    r.visible = rush > 0.05;
+    if (!r.visible) continue;
+    r.position.z += ringSpeed * dt;
+    if (r.position.z > 60) r.position.z -= 16 * 110;
+    const nearFade = Math.min(1, (60 - r.position.z) / 90);
+    r.material.opacity = fade * rush * 0.16 * Math.max(0, nearFade);
+    r.scale.setScalar(150 + Math.max(0, nearFade) * 420);
+  }
+
+  warp.core.material.opacity = fade * (0.3 + rush * 0.55);
+  warp.core.scale.setScalar(40 + rush * 340);
+  warp.veil.material.opacity = fade * rush * 0.14;
+  warp.spun += dt * (0.22 + rush * 0.8);
+  player.rotation.z = Math.sin(warp.spun) * 0.14 * rush;
+  flash.material.opacity = Math.max(flash.material.opacity, fade * rush * 0.2);
+
+  if (p >= 1) {
+    for (const st of warp.streaks) { player.remove(st.mesh); st.mesh.material.map.dispose(); st.mesh.material.dispose(); }
+    for (const r of warp.rings) { player.remove(r); r.material.dispose(); }
+    player.remove(warp.core); warp.core.material.dispose();
+    player.remove(warp.veil); warp.veil.material.dispose();
+    player.rotation.z = 0;
+    warp = null;
+    flash.material.opacity = 0;
+  }
+}
+
+function bossDefeated() {
+  const now = performance.now();
+  explode(boss.mesh.position, 4);
+  const bpos = boss.mesh.position.clone();
+  const away = headPos.clone().add(new THREE.Vector3(0, -2, -1).applyQuaternion(player.quaternion).multiplyScalar(45));
+  queueExplosion(bpos.clone().add(new THREE.Vector3(8, 3, 0)), 2, now + 200);
+  queueExplosion(bpos.clone().add(new THREE.Vector3(-9, -4, 4)), 2, now + 420);
+  queueExplosion(away, 3, now + 650);
+  scene.remove(boss.mesh); boss = null;
+  score += 3000 * (eraIndex + 1);
+  for (const e of enemies) { queueExplosion(e.mesh.position, 0.6, now + 120 + Math.random() * 500); scene.remove(e.mesh); }
+  enemies.length = 0;
+  eraIndex++;
+  if (eraIndex >= ERAS.length) { eraIndex = 0; loopCount++; }
+  kills = 0;
+  startWarp(era().year);
+  flashRestoreAt = 0;
+}
+
+// ---------- HUD ----------
+function drawHUD() {
+  const c = hctx;
+  c.clearRect(0, 0, 1024, 512);
+  c.fillStyle = 'rgba(2,14,20,0.72)'; c.fillRect(0, 0, 1024, 512);
+
+  // bezel
+  c.strokeStyle = '#0ff'; c.lineWidth = 4; c.strokeRect(4, 4, 1016, 504);
+  c.strokeStyle = 'rgba(0,255,255,0.35)'; c.lineWidth = 2; c.strokeRect(16, 16, 992, 480);
+  c.fillStyle = 'rgba(0,255,255,0.08)';
+  c.fillRect(16, 16, 992, 42);
+  c.fillStyle = '#0ff'; c.font = 'bold 22px monospace';
+  c.fillText('C H R O N O   A C E', 34, 45);
+  c.textAlign = 'right';
+  c.fillText('FLIGHT DECK', 994, 45);
+  c.textAlign = 'left';
+
+  // score / era / credits column
+  c.fillStyle = '#0ff'; c.font = 'bold 50px monospace';
+  c.fillText('SCORE', 34, 116);
+  c.fillStyle = '#fff'; c.fillText(String(score).padStart(6, '0'), 250, 116);
+  c.fillStyle = '#0ff'; c.font = 'bold 30px monospace';
+  c.fillText('ERA', 34, 166);
+  c.fillStyle = '#9ff'; c.fillText(era().year + (loopCount ? '  LOOP ' + loopCount : ''), 130, 166);
+  c.fillStyle = '#0ff'; c.fillText('CREDITS', 34, 208);
+  c.fillStyle = credits > 0 ? '#7cffb0' : '#ff6a5a';
+  c.fillText(credits > 0 ? String(credits) : 'NONE', 200, 208);
+
+  // lives as aircraft pips
+  // LIVES row: label, then pips, then the hull readout clear of them
+  c.fillStyle = '#0ff'; c.font = 'bold 30px monospace';
+  c.fillText('LIVES', 34, 256);
+  const pipStart = 200, pipGap = 40;
+  for (let i = 0; i < Math.max(lives, 0); i++) {
+    const x = pipStart + i * pipGap, y = 248;
+    c.fillStyle = i < lives ? '#7cffb0' : '#204040';
+    c.beginPath();
+    c.moveTo(x, y - 13); c.lineTo(x + 13, y); c.lineTo(x, y + 13); c.lineTo(x - 13, y);
+    c.closePath(); c.fill();
+  }
+  // hull sits to the right of the pips, in its own column
+  const hullX = pipStart + Math.max(lives, 1) * pipGap + 26;
+  c.fillStyle = '#0ff'; c.font = 'bold 26px monospace';
+  c.fillText('HULL', hullX, 256);
+  c.fillStyle = hull > 1 ? '#7cffb0' : '#ff8a5a';
+  c.fillText(Math.max(0, hull) + '/' + HITS_PER_LIFE, hullX + 84, 256);
+
+  // progress bar: kills to the boss, then boss health
+  const bx = 34, by = 296, bw = 462, bh = 28;
+  c.strokeStyle = '#0ff'; c.lineWidth = 3; c.strokeRect(bx, by, bw, bh);
+  const frac = boss ? boss.hp / boss.maxHp : Math.min(1, kills / KILLS_FOR_BOSS);
+  c.fillStyle = boss ? '#ff4433' : '#22d3a0';
+  c.fillRect(bx + 3, by + 3, (bw - 6) * frac, bh - 6);
+  c.fillStyle = '#0ff'; c.font = 'bold 24px monospace';
+  c.fillText(boss ? 'BOSS  ' + Math.max(0, boss.hp) + '/' + boss.maxHp : 'KILLS ' + kills + '/' + KILLS_FOR_BOSS, bx, by + 62);
+
+  // status message
+  if (messageTimer > 0) {
+    c.font = 'bold 40px monospace';
+    c.fillStyle = (Math.floor(performance.now() / 300) % 2) ? '#ff0' : '#fff';
+    c.fillText(message, 34, 420, 560);
+  }
+
+  // radar with sweep, rings and bearing ticks
+  const cx = 790, cy = 258, R = 218, range = 340;
+  c.save();
+  c.beginPath(); c.arc(cx, cy, R, 0, Math.PI * 2);
+  c.fillStyle = 'rgba(0,60,70,0.5)'; c.fill();
+  c.clip();
+  const sweep = (performance.now() / 1000) % (Math.PI * 2);
+  c.fillStyle = 'rgba(0,255,255,0.18)';
+  c.beginPath(); c.moveTo(cx, cy);
+  c.arc(cx, cy, R, sweep - 0.55, sweep); c.closePath(); c.fill();
+  c.restore();
+  c.strokeStyle = '#0ff'; c.lineWidth = 3;
+  c.beginPath(); c.arc(cx, cy, R, 0, Math.PI * 2); c.stroke();
+  c.lineWidth = 1.5; c.strokeStyle = 'rgba(0,255,255,0.45)';
+  for (const r of [R / 4, R / 2, R * 3 / 4]) { c.beginPath(); c.arc(cx, cy, r, 0, Math.PI * 2); c.stroke(); }
+  // bearing ticks around the rim, every 30 degrees
+  c.strokeStyle = 'rgba(0,255,255,0.6)'; c.lineWidth = 2;
+  for (let k = 0; k < 12; k++) {
+    const a = k / 12 * Math.PI * 2;
+    c.beginPath();
+    c.moveTo(cx + Math.cos(a) * (R - 12), cy + Math.sin(a) * (R - 12));
+    c.lineTo(cx + Math.cos(a) * R, cy + Math.sin(a) * R);
+    c.stroke();
+  }
+  c.beginPath(); c.moveTo(cx - R, cy); c.lineTo(cx + R, cy); c.moveTo(cx, cy - R); c.lineTo(cx, cy + R); c.stroke();
+  c.fillStyle = '#0ff'; c.font = 'bold 24px monospace';
+  c.textAlign = 'center';
+  c.fillText('FWD', cx, cy - R - 16);
+  c.textAlign = 'left';
+  c.fillStyle = '#0ff';
+  c.beginPath(); c.moveTo(cx, cy - 18); c.lineTo(cx - 14, cy + 14); c.lineTo(cx + 14, cy + 14); c.closePath(); c.fill();
+  const plot = (obj, color, size) => {
+    const l = player.worldToLocal(tmpV.copy(obj.position));
+    let x = l.x / range * R, y = l.z / range * R;
+    const d = Math.hypot(x, y);
+    if (d > R - size) { x *= (R - size) / d; y *= (R - size) / d; }
+    c.fillStyle = color; c.beginPath(); c.arc(cx + x, cy + y, size, 0, Math.PI * 2); c.fill();
+  };
+  for (const e of enemies) plot(e.mesh, '#ffd23f', 12);
+  if (boss) plot(boss.mesh, '#ff4433', 22);
+  // range scale under the dial
+  c.fillStyle = 'rgba(0,255,255,0.65)'; c.font = 'bold 20px monospace';
+  c.textAlign = 'center';
+  c.fillText('RANGE ' + range, cx, cy + R + 34);
+  c.textAlign = 'left';
+
+  // dashboard warning lamps: more of them lit as the danger rises
+  const litCount = state !== 'play' ? 1 : Math.min(lamps.length, 1 + Math.round((boss ? 2 : 0) + lives / START_LIVES * 2));
+  for (let i = 0; i < lamps.length; i++) {
+    const on = i < litCount;
+    lamps[i].material = i < 2 ? (on ? ledMat : dimMat) : i < 4 ? (on ? amberMat : dimMat) : (on ? warnMat : dimMat);
+    if (on !== lamps[i].userData.on) {
+      lamps[i].userData.on = on;
+      lamps[i].scale.setScalar(on ? 1 : 0.6);
+    }
+  }
+  c.fillStyle = 'rgba(0,255,255,0.55)';
+  c.font = 'bold 18px monospace';
+  c.textAlign = 'center';
+  c.fillText('CONTROLS', 512, 418);
+  c.textAlign = 'left';
+  drawPerf(c);
+  drawButtons(c);
+  hudTex.needsUpdate = true;
+}
+
+// ---------- Frame rate counter ----------
+// Shows displayed FPS and the average frame time. In VR the frame time is the
+// number that matters: 11.1 ms is the budget for 90 fps, 16.7 ms is 60 fps.
+const perf = { frames: 0, last: performance.now(), fps: 0, msAvg: 0, msSamples: [], worst: 0 };
+function perfTick(nowMs) {
+  perf.frames++;
+  const elapsed = nowMs - perf.last;
+  if (elapsed >= 500) {
+    perf.fps = Math.round((perf.frames * 1000) / elapsed);
+    perf.frames = 0;
+    perf.last = nowMs;
+  }
+}
+// Called with the frame's own build cost, so we can show the real budget usage
+function perfFrame(ms) {
+  perf.msSamples.push(ms);
+  if (perf.msSamples.length > 40) perf.msSamples.shift();
+  const sum = perf.msSamples.reduce((a, b) => a + b, 0);
+  perf.msAvg = sum / perf.msSamples.length;
+  perf.worst = Math.max(perf.worst, ms);
+}
+function drawPerf(c) {
+  const fps = perf.fps || 0;
+  const ms = perf.msAvg || 0;
+  // green at 90+, amber below it, red under 60
+  const col = fps >= 85 ? '#7cffb0' : fps >= 55 ? '#ffcc55' : '#ff6a5a';
+  // Placed in the left column, below the credits row, where the panel faces the eye.
+  c.fillStyle = 'rgba(2,14,20,0.8)';
+  c.fillRect(34, 300, 300, 62);
+  c.strokeStyle = col; c.lineWidth = 2;
+  c.strokeRect(34, 300, 300, 62);
+  c.textAlign = 'left';
+  c.fillStyle = col; c.font = 'bold 30px monospace';
+  c.fillText(fps + ' FPS', 48, 332);
+  c.fillStyle = ms <= 11.1 ? '#7cffb0' : ms <= 16.7 ? '#ffcc55' : '#ff6a5a';
+  c.font = 'bold 26px monospace';
+  c.fillText(ms.toFixed(1) + ' ms', 200, 332);
+  c.fillStyle = '#6fb8c8'; c.font = 'bold 16px monospace';
+  c.fillText('90 fps budget = 11.1 ms', 48, 354);
+}
+
+// ---------- Main loop ----------
+const clock = new THREE.Clock();
+let frame = 0;
+const dead = v => Math.abs(v) < 0.15 ? 0 : v;
+
+let lastError = null;
+function gameFrame() {
+  const frameStart = performance.now();
+  const dt = Math.min(clock.getDelta(), 0.05);
+  frame++;
+  perfTick(frameStart);
+  const inVR = renderer.xr.isPresenting;
+  crosshair.visible = !inVR;
+  document.getElementById('help').style.display = inVR ? 'none' : 'block';
+
+  // --- input ---
+  let steerX = 0, steerY = 0, fire = mouseDown || !!keys.Space, aimObj = camera;
+  if (keys.KeyA || keys.ArrowLeft) steerX -= 1;
+  if (keys.KeyD || keys.ArrowRight) steerX += 1;
+  if (keys.KeyW || keys.ArrowUp) steerY += 1;
+  if (keys.KeyS || keys.ArrowDown) steerY -= 1;
+  yaw -= mouseDX * 0.002; pitch -= mouseDY * 0.002; mouseDX = mouseDY = 0;
+  for (const c of controllers) {
+    const gp = c.userData.gamepad;
+    if (!gp) continue;
+    const ax = gp.axes;
+    const x = dead(ax.length >= 4 ? ax[2] : (ax[0] || 0));
+    const y = dead(ax.length >= 4 ? ax[3] : (ax[1] || 0));
+    if (c.userData.hand === 'left') { steerX += x; steerY += y; }
+    else { steerX += x * 0.5; }
+    if (gp.buttons[0] && gp.buttons[0].pressed) { fire = true; aimObj = c; }
+  }
+
+  // --- flight --- (the ship flies straight and level through a warp jump)
+  if (warp) {
+    playerVel.set(0, 0, -PLAYER_SPEED);
+    const fwdW = tmpV.set(0, 0, -1).applyQuaternion(player.quaternion);
+    player.position.addScaledVector(fwdW, PLAYER_SPEED * dt * 1.6);
+    yaw = player.rotation.y; pitch = player.rotation.x; bank = player.rotation.z;
+  } else if (state === 'play' || state === 'title') {
+    // Full 360: no pitch limit, so pulling back carries you over the top and round.
+    yaw -= steerX * 1.3 * dt;
+    pitch += steerY * 1.05 * dt;
+    // bank into the turn, and let the bank build the further you hold it
+    const bankTarget = -steerX * 0.85;
+    bank += (bankTarget - bank) * Math.min(1, 4 * dt);
+    player.rotation.set(pitch, yaw, bank);
+    const fwd = tmpV.set(0, 0, -1).applyQuaternion(player.quaternion);
+    playerVel.copy(fwd).multiplyScalar(state === 'play' ? PLAYER_SPEED : 10);
+    player.position.addScaledVector(playerVel, dt);
+  }
+  // --- mountain collision: fly into a range and you go down ---
+  if (state === 'play' && !warp) {
+    let struck = false;
+    for (const r of MASSIF_RANGES) {
+      const dx = player.position.x, dz = player.position.z;
+      const dist = Math.hypot(dx, dz);
+      if (dist > r.outer || dist < r.inner) continue;
+      // bearing from the origin, to compare against the wedge this range occupies
+      let ang = Math.atan2(dz, dx);
+      while (ang < 0) ang += Math.PI * 2;
+      let a0 = r.a0, a1 = r.a1;
+      if (ang < a0 || ang > a1) continue;
+      // the crest height at this bearing, and the ship's height above the base
+      const t = (ang - a0) / (a1 - a0);
+      // exactly the crest the mesh builds, so the crash zone matches the visible rock
+      const base = ridgeProfile(t, r.seed);
+      const spikes = ridgeProfile(t * 2.6, r.seed + 17);
+      const ends = Math.pow(Math.sin(t * Math.PI), 0.55);
+      const crest = r.height * (0.28 + base * 0.62 + spikes * 0.26) * ends;
+      // a small margin so you cannot fly through the very top of a peak
+      if (player.position.y < r.baseY + crest - 4) { struck = true; break; }
+    }
+    if (struck) {
+      explode(player.position.clone(), 2.2);
+      sfxDamage(); sfxAlarm(3, 500, 120);
+      lastEraIndex = eraIndex; lastLoopCount = loopCount;
+      lives = 0; hull = HITS_PER_LIFE;
+      state = 'over'; stateTimer = 1.5;
+      musicStop(); stopRealMusic();
+      showMessage('YOU HIT THE MOUNTAIN - FIRE TO ' + (credits > 0 ? 'CONTINUE' : 'RESTART'), 9999);
+    }
+  }
+
+  // --- ground collision: hit the deck and you go down ---
+  // the ground is no longer flat, so ask the same noise field how high it is here
+  const gx = player.position.x, gz = player.position.z;
+  const gu = (gx + GROUND_R) / (GROUND_R * 2), gv = (gz + GROUND_R) / (GROUND_R * 2);
+  const gpx = gu * 1024, gpy = gv * 1024;
+  const gh = fbm(gpx / 300, gpy / 300, 3 + 4.2, 3);
+  const gridge = fbm(gpx / 620, gpy / 620, 4.2 + 88, 2);
+  const gdetail = fbm(gpx / 60, gpy / 60, 4.2 + 12, 3);
+  const groundHere = GROUND_Y + Math.max(0, gh - 0.42) * 62 + Math.max(0, gridge - 0.55) * 90 + (gdetail - 0.5) * 7;
+  if (state === 'play' && !warp && player.position.y <= groundHere + 6) {
+    const crashPos = player.position.clone();
+    explode(crashPos, 2.5);
+    sfxDamage();
+    sfxAlarm(3, 500, 120);
+    lastEraIndex = eraIndex; lastLoopCount = loopCount;
+    lives = 0; hull = HITS_PER_LIFE;
+    state = 'over'; stateTimer = 1.5;
+    musicStop(); stopRealMusic();
+    showMessage('YOU CRASHED - FIRE TO ' + (credits > 0 ? 'CONTINUE' : 'RESTART'), 9999);
+  }
+  camera.getWorldPosition(headPos);
+  updateListener();
+  setEngine(state === 'play' ? 0.5 : state === 'title' ? 0.35 : 0.2,
+    state === 'play' ? PLAYER_SPEED : 12, steerX);
+
+  // --- pause freezes the world: no movement, no spawning, no timers ---
+  if (paused) {
+    if (frame % 12 === 0) drawHUD();
+    renderer.render(scene, camera);
+    return;
+  }
+
+  // --- state transitions ---
+  if (state === 'title' && fire) { initAudio(); newCampaign(); if (!musicMuted) playTrackForEra(era().year); fireCool = 0.4; }
+  if (state === 'over') {
+    stateTimer -= dt;
+    if (stateTimer <= 0 && fire) {
+      if (credits > 0) continueCampaign(); else newCampaign();
+      if (!musicMuted) playTrackForEra(era().year);
+      fireCool = 0.4;
+    }
+  }
+
+  // --- shooting ---
+  fireCool -= dt;
+  if (state === 'play' && fire && fireCool <= 0) {
+    fireCool = 0.11;
+    aimObj.getWorldQuaternion(tmpQ);
+    const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(tmpQ);
+    const origin = aimObj.getWorldPosition(new THREE.Vector3()).addScaledVector(dir, 1.5);
+    if (aimObj === camera) origin.addScaledVector(new THREE.Vector3(0, -1, 0).applyQuaternion(tmpQ), 0.4);
+    spawnBullet(origin, dir.multiplyScalar(260).add(playerVel), false);
+    sfxShoot(headPos);
+  }
+
+  // --- spawning ---
+  if (state === 'play') {
+    const maxEnemies = 6 + eraIndex * 2 + loopCount * 2;
+    if (!boss && enemies.length < maxEnemies && Math.random() < dt * 2) spawnEnemy();
+    if (!boss && kills >= KILLS_FOR_BOSS) spawnBoss();
+  }
+
+  // --- enemies ---
+  const t = performance.now() / 1000;
+  for (let i = enemies.length - 1; i >= 0; i--) {
+    const e = enemies[i];
+    e.offset.applyAxisAngle(THREE.Object3D.DEFAULT_UP, dt * 0.6);
+    steerAndMove(e, tmpV.copy(headPos).add(e.offset), 1.2, dt);
+    const dist = e.mesh.position.distanceTo(headPos);
+    if (dist > 520) { scene.remove(e.mesh); enemies.splice(i, 1); continue; }
+    e.cool -= dt;
+    if (state === 'play' && e.cool <= 0 && dist < 170) {
+      const to = tmpV.copy(headPos).sub(e.mesh.position).normalize();
+      if (to.dot(e.dir) > 0.7) { enemyFire(e.mesh.position.clone(), 0.06, 90 + era().speed); e.cool = 1.8 + Math.random() * 2.5; }
+    }
+    if (dist < 3.5) { killEnemy(i); hitPlayer(); }
+  }
+
+  // --- boss ---
+  if (boss) {
+    boss.angle += dt * 0.35;
+    const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(player.quaternion);
+    const target = headPos.clone().addScaledVector(fwd, 90)
+      .add(new THREE.Vector3(Math.cos(boss.angle) * 50, Math.sin(boss.angle * 1.3) * 20, Math.sin(boss.angle) * 50));
+    steerAndMove(boss, target, 0.8, dt);
+    boss.speed = PLAYER_SPEED * 1.1;
+    boss.cool -= dt;
+    if (state === 'play' && boss.cool <= 0 && boss.mesh.position.distanceTo(headPos) < 250) {
+      for (let k = 0; k < 5; k++) enemyFire(boss.mesh.position.clone(), 0.12, 80);
+      boss.cool = 1.6 - Math.min(0.8, loopCount * 0.2);
+      sfxBeep(boss.mesh.position.distanceTo(headPos) < 120 ? 900 : 620, 0.12, 0.16, 'square');
+    }
+  }
+
+  // --- bullets ---
+  for (const b of bullets) {
+    if (!b.alive) continue;
+    b.mesh.position.addScaledVector(b.vel, dt);
+    b.life -= dt;
+    if (b.life <= 0) { b.alive = false; b.mesh.visible = false; continue; }
+    const p = b.mesh.position;
+    if (b.enemy) {
+      if (p.distanceTo(headPos) < 1.6) { b.alive = false; b.mesh.visible = false; hitPlayer(); }
+    } else {
+      for (let i = enemies.length - 1; i >= 0; i--) {
+        if (p.distanceTo(enemies[i].mesh.position) < enemies[i].radius) {
+          b.alive = false; b.mesh.visible = false; killEnemy(i); break;
+        }
+      }
+      if (b.alive && boss && p.distanceTo(boss.mesh.position) < boss.radius) {
+        b.alive = false; b.mesh.visible = false;
+        boss.hp--; score += 50;
+        explode(p.clone(), 0.25);
+        if (boss.hp <= 0) bossDefeated();
+      }
+    }
+  }
+
+  // --- particles ---
+  updateParticles(performance.now());
+  updateFxQueue(performance.now());
+  musicPump(performance.now());
+  updateWarp(dt);
+  if (flashRestoreAt && performance.now() >= flashRestoreAt) { flash.material.color.setHex(0xff0000); flashRestoreAt = 0; }
+
+  sky.position.copy(player.position);
+  updateCars(dt);
+  // mountains stay put in the world; only the sky follows the player
+  for (const e of enemies) e.mesh.traverse(o => { if (o.userData.spinY) o.rotation.y += dt * 2; });
+  if (boss) boss.mesh.traverse(o => { if (o.userData.spinY) o.rotation.y += dt * 1.2; });
+  // --- clouds wrap around player ---
+  for (const cl of clouds) {
+    for (const a of ['x', 'y', 'z']) {
+      const d = cl.position[a] - player.position[a];
+      if (d > CLOUD_R) cl.position[a] -= CLOUD_R * 2;
+      else if (d < -CLOUD_R) cl.position[a] += CLOUD_R * 2;
+    }
+  }
+
+  // --- timers & HUD ---
+  if (invuln > 0) { invuln -= dt; cockpit.visible = state !== 'play' || Math.floor(t * 8) % 2 === 0; }
+  else cockpit.visible = true;
+  flash.material.opacity = Math.max(0, flash.material.opacity - dt * 1.5);
+  if (messageTimer > 0 && messageTimer < 9999) messageTimer -= dt;
+  // the stick leans with your steering and pitches with your climb
+  if (typeof stickBase !== 'undefined' && stickBase) {
+    const stickX = Math.max(-1, Math.min(1, steerX));
+    const stickY = Math.max(-1, Math.min(1, steerY));
+    stickBase.rotation.z += (-stickX * 0.42 - stickBase.rotation.z) * Math.min(1, 12 * dt);
+    stickBase.rotation.x += (stickY * 0.5 - stickBase.rotation.x) * Math.min(1, 12 * dt);
+  }
+  if (frame % 3 === 0) drawHUD();
+  renderer.render(scene, camera);
+  perfFrame(performance.now() - frameStart);
+}
+renderer.setAnimationLoop(() => {
+  try { gameFrame(); } catch (err) {
+    if (err.message !== lastError) {
+      lastError = err.message;
+      const h = document.getElementById('help');
+      if (h) {
+        h.style.display = 'block';
+        h.innerHTML = '<b>CHRONO ACE VR &mdash; stopped</b><br>' + err.message +
+          '<br><span style="opacity:.7">send me this line and I will fix it</span>';
+      }
+      musicStop();
+    }
+  }
+});
+
+</script>
+</body>
+</html>
