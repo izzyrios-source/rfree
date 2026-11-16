@@ -813,6 +813,27 @@ function stopRealMusic() {
   trackPlaying = null;
 }
 
+// ---------- Comfort vignette ----------
+// A dark ring at the edge of the view, fading in when you turn or roll hard. It cuts
+// the peripheral motion that causes most VR sickness while leaving the centre clear.
+const vigGroup = new THREE.Group();
+camera.add(vigGroup);
+const vigRing = new THREE.Mesh(
+  new THREE.RingGeometry(0.55, 1.6, 40),
+  new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0,
+    depthTest: false, side: THREE.DoubleSide }));
+vigRing.position.z = -0.6;
+vigRing.renderOrder = 20;
+vigGroup.add(vigRing);
+let vigAmount = 0;
+function updateVignette(dt, turnAmount) {
+  if (!vignette || !renderer.xr.isPresenting) { vigRing.material.opacity = 0; return; }
+  // ramp in above a threshold, so gentle flying is untouched
+  const want = Math.max(0, Math.min(1, (turnAmount - 0.35) / 0.65)) * 0.75;
+  vigAmount += (want - vigAmount) * Math.min(1, 6 * dt);
+  vigRing.material.opacity = vigAmount;
+}
+
 // ---------- Cockpit ----------
 const cockpit = new THREE.Group();
 player.add(cockpit);
@@ -1345,14 +1366,24 @@ const controllers = [0, 1].map(i => {
 let uiButtons = [];       // filled in by the HUD drawing code, read by the pointer handler
 let hoveredButton = null; // set by the pointer handler, read by the drawing code
 let paused = false, pauseHeld = 0;
-const BTN = { w: 190, h: 40, y: 428, gap: 14 };
+// Comfort settings, toggled from the dashboard buttons
+let snapTurn = false;        // turn in steps instead of smoothly
+let vignette = true;         // darken the edges of the view when turning hard
+let reducedRoll = false;     // fly flat: much less bank
+let snapAccum = 0;           // how far we have turned since the last snap
+const SNAP_STEP = 30 * Math.PI / 180;
+const BTN = { w: 190, h: 36, y: 428, gap: 14, row2: 478 };
 function buttonRects() {
   const total = BTN.w * 3 + BTN.gap * 2;
   const x0 = (1024 - total) / 2;
   return [
-    { id: 'music', x: x0,                                    y: BTN.y, w: BTN.w, h: BTN.h },
-    { id: 'pause', x: x0 + (BTN.w + BTN.gap),                y: BTN.y, w: BTN.w, h: BTN.h },
-    { id: 'quit',  x: x0 + (BTN.w + BTN.gap) * 2,            y: BTN.y, w: BTN.w, h: BTN.h },
+    { id: 'music',    x: x0,                          y: BTN.y,     w: BTN.w, h: BTN.h },
+    { id: 'pause',    x: x0 + (BTN.w + BTN.gap),      y: BTN.y,     w: BTN.w, h: BTN.h },
+    { id: 'quit',     x: x0 + (BTN.w + BTN.gap) * 2,  y: BTN.y,     w: BTN.w, h: BTN.h },
+    // comfort row
+    { id: 'snap',     x: x0,                          y: BTN.row2,  w: BTN.w, h: BTN.h },
+    { id: 'vignette', x: x0 + (BTN.w + BTN.gap),      y: BTN.row2,  w: BTN.w, h: BTN.h },
+    { id: 'roll',     x: x0 + (BTN.w + BTN.gap) * 2,  y: BTN.row2,  w: BTN.w, h: BTN.h },
   ];
 }
 function drawButtons(c) {
@@ -1360,9 +1391,14 @@ function drawButtons(c) {
     music: musicMuted ? 'MUSIC OFF' : 'MUSIC ON',
     pause: paused ? 'RESUME' : 'PAUSE',
     quit: 'QUIT',
+    snap: snapTurn ? 'SNAP ON' : 'SNAP OFF',
+    vignette: vignette ? 'VIGNETTE ON' : 'VIGNETTE OFF',
+    roll: reducedRoll ? 'FLAT FLIGHT' : 'ROLL ON',
   };
   for (const b of buttonRects()) {
-    const active = (b.id === 'music' && !musicMuted) || (b.id === 'pause' && paused);
+    const active = (b.id === 'music' && !musicMuted) || (b.id === 'pause' && paused) ||
+                   (b.id === 'snap' && snapTurn) || (b.id === 'vignette' && vignette) ||
+                   (b.id === 'roll' && reducedRoll);
     const hover = hoveredButton === b.id;
     c.fillStyle = active ? 'rgba(0,120,110,0.85)' : 'rgba(8,26,32,0.85)';
     c.fillRect(b.x, b.y, b.w, b.h);
@@ -1392,6 +1428,16 @@ function pressButton(id) {
   } else if (id === 'pause') {
     if (state === 'play') { paused = true; musicStop(); stopRealMusic(); showMessage('PAUSED', 9999); }
     else if (paused) { paused = false; if (!musicMuted) playTrackForEra(era().year); showMessage('', 0.01); }
+  } else if (id === 'snap') {
+    snapTurn = !snapTurn;
+    snapAccum = 0;
+    showMessage(snapTurn ? 'SNAP TURN ON' : 'SNAP TURN OFF', 1.4);
+  } else if (id === 'vignette') {
+    vignette = !vignette;
+    showMessage(vignette ? 'COMFORT VIGNETTE ON' : 'COMFORT VIGNETTE OFF', 1.4);
+  } else if (id === 'roll') {
+    reducedRoll = !reducedRoll;
+    showMessage(reducedRoll ? 'FLAT FLIGHT ON' : 'ROLL RESTORED', 1.4);
   } else if (id === 'quit') {
     paused = false;
     musicStop();
@@ -1691,124 +1737,6 @@ function updateCars(dt) {
     }
   }
 }
-
-// Smooth-shaded rock: no facets, so the ranges read as landform rather than cutouts
-const hillMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.96, metalness: 0, fog: true });
-const hillMat2 = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.96, metalness: 0, fog: true });
-const hillMat3 = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1.0, metalness: 0, fog: true });
-
-// Colour rock by height and steepness: grass on the gentle low ground, bare rock on
-// the steep faces, snow only on the true summits. This is what makes a range read
-// as a mountain instead of a grey lump.
-function paintTerrain(geo, height, baseY, snowAt) {
-  const pos = geo.attributes.position;
-  const nrm = geo.attributes.normal;
-  const colors = [];
-  const grass = new THREE.Color(0x5c6f42);
-  const rockDark = new THREE.Color(0x51473c);
-  const rockLight = new THREE.Color(0x8a8073);
-  const snow = new THREE.Color(0xf2f6fa);
-  for (let i = 0; i < pos.count; i++) {
-    const y = pos.getY(i);
-    const up = Math.abs(nrm.getY(i));                 // 1 = flat, 0 = vertical face
-    const alt = (y - baseY) / Math.max(1, height);
-    const c = grass.clone();
-    // steeper faces turn to bare rock
-    const steep = 1 - Math.min(1, up * 1.4);
-    c.lerp(rockDark.clone().lerp(rockLight, Math.min(1, alt * 1.3)), steep * 0.92);
-    // the tops go pale, then snow above the snow line
-    if (snowAt !== null) {
-      const t = Math.max(0, Math.min(1, (alt - snowAt) / 0.28));
-      c.lerp(snow, t * t * (0.55 + 0.45 * up));
-    }
-    colors.push(c.r, c.g, c.b);
-  }
-  geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
-}
-const D = Math.PI / 180;
-
-// Each entry is a wedge of the compass in degrees. The gaps between them are open
-function ridgeProfile(t, seed) {
-  let h = 0, amp = 1, freq = 2.4, norm = 0;
-  for (let o = 0; o < 5; o++) {
-    const x = t * freq;
-    const i = Math.floor(x), f = x - i;
-    const u = f * f * (3 - 2 * f);
-    const n = noise2(i, seed, o) * (1 - u) + noise2(i + 1, seed, o) * u;
-    h += n * amp;
-    norm += amp; amp *= 0.55; freq *= 2.3;
-  }
-  return h / norm;
-}
-// How deeply gullies bite into the flank, varying along the ridge so spurs alternate
-function gullyAt(t, seed) {
-  return 0.10 + 0.42 * ridgeProfile(t * 1.7 + 0.21, seed + 61);
-}
-// Real mountain form: a ridgeline of peaks and passes, eroded flanks with gullies,
-// and uneven scree spread at the base. That is what stops it reading as one cake.
-function massifGeo(radius, height, seed, rows, baseY, a0, a1) {
-  const segs = 96;
-  const verts = [], idx = [];
-  for (let r = 0; r <= rows; r++) {
-    const depth = r / rows;                      // 0 at the crest, 1 at the base
-    for (let i = 0; i <= segs; i++) {
-      const t = i / segs;
-      const ang = a0 + t * (a1 - a0);
-      const base = ridgeProfile(t, seed);
-      const spikes = ridgeProfile(t * 2.6, seed + 17);
-      const ends = Math.pow(Math.sin(t * Math.PI), 0.55);   // fades out at the ends
-      const crest = height * (0.28 + base * 0.62 + spikes * 0.26) * ends;
-      // the flank is not one even curve: gullies cut into it, deeper in places
-      const gully = gullyAt(t, seed);
-      const shape = Math.pow(depth, 1.35);                  // steepest near the top
-      const cut = shape * (1 - gully * Math.sin(depth * Math.PI));
-      const y = crest * (1 - cut) + baseY * cut;
-      // scree fans and spurs reach further out in some places than others
-      const spread = 0.10 + 0.22 * ridgeProfile(t * 3.1 + 0.6, seed + 33);
-      const rr = radius * (1 + spread * (1 - shape));
-      verts.push(Math.cos(ang) * rr, y, Math.sin(ang) * rr);
-    }
-  }
-  for (let r = 0; r < rows; r++) {
-    for (let i = 0; i < segs; i++) {
-      const a0i = r * (segs + 1) + i, b0i = a0i + 1;
-      const a1i = (r + 1) * (segs + 1) + i, b1i = a1i + 1;
-      idx.push(a0i, a1i, b0i, b0i, a1i, b1i);
-    }
-  }
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
-  g.setIndex(idx);
-  g.computeVertexNormals();
-  return g;
-}
-
-function addMassif(radius, height, seed, rows, mat, snowAt, a0, a1) {
-  const baseY = GROUND_Y;
-  const geo = massifGeo(radius, height, seed, rows, baseY, a0 * D, a1 * D);
-  // One mesh, coloured by height and steepness: grass, rock, snow. Cheaper than the
-  // old two-mesh approach and far more convincing than a single flat colour.
-  paintTerrain(geo, height, baseY, snowAt);
-  const mesh = new THREE.Mesh(geo, mat);
-  scene.add(mesh); mountains.push(mesh);
-}
-
-// Near hills: two separate masses, with open country between them
-// The ranges, recorded so the collision test can ask where the rock is
-const MASSIF_RANGES = [
-  { outer: 900, inner: 620, height: 112, seed: 3.7, baseY: GROUND_Y, a0: -148 * D, a1: -74 * D },
-  { outer: 900, inner: 620, height: 124, seed: 8.1, baseY: GROUND_Y, a0: 26 * D, a1: 96 * D },
-  { outer: 1300, inner: 940, height: 172, seed: 11.3, baseY: GROUND_Y, a0: -84 * D, a1: -18 * D },
-  { outer: 1300, inner: 940, height: 158, seed: 17.5, baseY: GROUND_Y, a0: 128 * D, a1: 178 * D },
-  { outer: 1680, inner: 1300, height: 205, seed: 23.9, baseY: GROUND_Y, a0: 40 * D, a1: 118 * D },
-];
-addMassif(760, 112, 3.7, 10, hillMat, 0.72, -148, -74);   // behind-left
-addMassif(760, 124, 8.1, 10, hillMat, 0.70, 26, 96);      // right
-// Mid range: one broad mass off to the side, one behind
-addMassif(1120, 172, 11.3, 9, hillMat2, 0.62, -84, -18);
-addMassif(1120, 158, 17.5, 9, hillMat2, 0.66, 128, 178);
-// Far range: pale, low, and only across part of the horizon
-addMassif(1480, 205, 23.9, 8, hillMat3, null, 40, 118);
 
 // ---------- Aircraft meshes ----------
 const roundelTex = (() => {
@@ -2460,50 +2388,28 @@ function gameFrame() {
     yaw = player.rotation.y; pitch = player.rotation.x; bank = player.rotation.z;
   } else if (state === 'play' || state === 'title') {
     // Full 360: no pitch limit, so pulling back carries you over the top and round.
-    yaw -= steerX * 1.3 * dt;
+    // Snap turning: hold the stick and the view rotates in 30-degree steps rather
+    // than sweeping continuously. Much easier on the inner ear.
+    if (snapTurn) {
+      snapAccum -= steerX * 1.3 * dt;
+      if (Math.abs(snapAccum) >= SNAP_STEP) {
+        yaw -= Math.sign(snapAccum) * SNAP_STEP;
+        snapAccum = 0;
+      }
+    } else {
+      yaw -= steerX * 1.3 * dt;
+    }
     pitch += steerY * 1.05 * dt;
     // bank into the turn, and let the bank build the further you hold it
-    const bankTarget = -steerX * 0.85;
+    // Reduced roll: flying flat removes the bank, which is one of the more
+    // nauseating motions in a cockpit game.
+    const bankTarget = reducedRoll ? 0 : -steerX * 0.85;
     bank += (bankTarget - bank) * Math.min(1, 4 * dt);
     player.rotation.set(pitch, yaw, bank);
     const fwd = tmpV.set(0, 0, -1).applyQuaternion(player.quaternion);
     playerVel.copy(fwd).multiplyScalar(state === 'play' ? PLAYER_SPEED : 10);
     player.position.addScaledVector(playerVel, dt);
   }
-  // --- mountain collision: fly into a range and you go down ---
-  if (state === 'play' && !warp) {
-    let struck = false;
-    for (const r of MASSIF_RANGES) {
-      const dx = player.position.x, dz = player.position.z;
-      const dist = Math.hypot(dx, dz);
-      if (dist > r.outer || dist < r.inner) continue;
-      // bearing from the origin, to compare against the wedge this range occupies
-      let ang = Math.atan2(dz, dx);
-      while (ang < 0) ang += Math.PI * 2;
-      let a0 = r.a0, a1 = r.a1;
-      if (ang < a0 || ang > a1) continue;
-      // the crest height at this bearing, and the ship's height above the base
-      const t = (ang - a0) / (a1 - a0);
-      // exactly the crest the mesh builds, so the crash zone matches the visible rock
-      const base = ridgeProfile(t, r.seed);
-      const spikes = ridgeProfile(t * 2.6, r.seed + 17);
-      const ends = Math.pow(Math.sin(t * Math.PI), 0.55);
-      const crest = r.height * (0.28 + base * 0.62 + spikes * 0.26) * ends;
-      // a small margin so you cannot fly through the very top of a peak
-      if (player.position.y < r.baseY + crest - 4) { struck = true; break; }
-    }
-    if (struck) {
-      explode(player.position.clone(), 2.2);
-      sfxDamage(); sfxAlarm(3, 500, 120);
-      lastEraIndex = eraIndex; lastLoopCount = loopCount;
-      lives = 0; hull = HITS_PER_LIFE;
-      state = 'over'; stateTimer = 1.5;
-      musicStop(); stopRealMusic();
-      showMessage('YOU HIT THE MOUNTAIN - FIRE TO ' + (credits > 0 ? 'CONTINUE' : 'RESTART'), 9999);
-    }
-  }
-
-  // --- ground collision: hit the deck and you go down ---
   // the ground is no longer flat, so ask the same noise field how high it is here
   const gx = player.position.x, gz = player.position.z;
   const gu = (gx + GROUND_R) / (GROUND_R * 2), gv = (gz + GROUND_R) / (GROUND_R * 2);
@@ -2630,6 +2536,7 @@ function gameFrame() {
 
   sky.position.copy(player.position);
   updateCars(dt);
+  updateVignette(dt, Math.min(1.4, Math.abs(steerX) + Math.abs(bank) * 0.7));
   // mountains stay put in the world; only the sky follows the player
   for (const e of enemies) e.mesh.traverse(o => { if (o.userData.spinY) o.rotation.y += dt * 2; });
   if (boss) boss.mesh.traverse(o => { if (o.userData.spinY) o.rotation.y += dt * 1.2; });
