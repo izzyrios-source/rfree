@@ -31,6 +31,53 @@ import * as THREE from 'three';
 import { VRButton } from 'three/addons/webxr/VRButton.js';
 
 const scene = new THREE.Scene();
+// A blue sky with soft clouds, painted once and used as the scene's backdrop.
+const skyTex = (() => {
+  const c = document.createElement('canvas'); c.width = 1024; c.height = 512;
+  const x = c.getContext('2d');
+  // the sky itself: deeper blue at the top, paler toward the horizon
+  const g = x.createLinearGradient(0, 0, 0, 512);
+  g.addColorStop(0, '#2f6fc4');
+  g.addColorStop(0.55, '#6aa7e0');
+  g.addColorStop(1, '#cfe6f7');
+  x.fillStyle = g; x.fillRect(0, 0, 1024, 512);
+  // each puff is a cluster of soft circles, so it reads as cloud rather than a blob
+  const puff = (cx, cy, r, a) => {
+    const rg = x.createRadialGradient(cx, cy, 0, cx, cy, r);
+    rg.addColorStop(0, 'rgba(255,255,255,' + a + ')');
+    rg.addColorStop(0.55, 'rgba(255,255,255,' + a * 0.75 + ')');
+    rg.addColorStop(1, 'rgba(255,255,255,0)');
+    x.fillStyle = rg;
+    x.beginPath(); x.arc(cx, cy, r, 0, Math.PI * 2); x.fill();
+  };
+  for (let i = 0; i < 26; i++) {
+    const cx = Math.random() * 1024, cy = 40 + Math.random() * 300;
+    const r = 26 + Math.random() * 54;
+    const lobes = 4 + Math.floor(Math.random() * 4);
+    for (let k = 0; k < lobes; k++) {
+      const a = (k / lobes) * Math.PI * 2;
+      puff(cx + Math.cos(a) * r * 0.7, cy + Math.sin(a) * r * 0.3,
+           r * (0.6 + Math.random() * 0.5), 0.5 + Math.random() * 0.4);
+    }
+    puff(cx, cy, r * 1.1, 0.85);
+  }
+  // a few thin high wisps near the top
+  for (let i = 0; i < 10; i++) {
+    const wy = 12 + Math.random() * 120;
+    x.strokeStyle = 'rgba(255,255,255,' + (0.15 + Math.random() * 0.2) + ')';
+    x.lineWidth = 2 + Math.random() * 5;
+    x.beginPath();
+    let wx = Math.random() * 900;
+    x.moveTo(wx, wy);
+    for (let k = 0; k < 5; k++) { wx += 60 + Math.random() * 80; x.lineTo(wx, wy + (Math.random() - 0.5) * 22); }
+    x.stroke();
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  return t;
+})();
+scene.background = skyTex;
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.setSize(innerWidth, innerHeight);
@@ -708,25 +755,29 @@ const crateGeo = new THREE.BoxGeometry(0.05, 0.038, 0.05);
 const crateLidTex = (() => {
   const c = document.createElement('canvas'); c.width = c.height = 64;
   const x = c.getContext('2d');
-  x.fillStyle = '#6b5232'; x.fillRect(0, 0, 64, 64);
-  for (let i = 0; i < 90; i++) {                       // grain
-    x.strokeStyle = 'rgba(60,44,26,' + (0.15 + Math.random() * 0.3) + ')';
-    x.lineWidth = 1;
-    const py = Math.random() * 64;
-    x.beginPath(); x.moveTo(0, py); x.lineTo(64, py + (Math.random() - 0.5) * 4); x.stroke();
+  x.fillStyle = '#4a5a35'; x.fillRect(0, 0, 64, 64);   // army green
+  for (let i = 0; i < 240; i++) {                       // a stippled, drab surface
+    x.fillStyle = 'rgba(' + (40 + Math.random() * 40 | 0) + ',' +
+                  (52 + Math.random() * 40 | 0) + ',' + (28 + Math.random() * 26 | 0) + ',0.5)';
+    x.fillRect(Math.random() * 64, Math.random() * 64, 2, 2);
   }
-  x.strokeStyle = '#4a3a24'; x.lineWidth = 3;          // planks
-  for (let i = 8; i < 64; i += 14) { x.beginPath(); x.moveTo(0, i); x.lineTo(64, i); x.stroke(); }
-  x.strokeStyle = '#8a6f45'; x.lineWidth = 4;          // an iron band around the lid
-  x.strokeRect(5, 5, 54, 54);
-  x.fillStyle = '#3d2f1c';                              // nail heads
-  for (const [nx, ny] of [[12, 12], [52, 12], [12, 52], [52, 52]]) {
-    x.beginPath(); x.arc(nx, ny, 2.5, 0, Math.PI * 2); x.fill();
+  x.strokeStyle = '#38452a'; x.lineWidth = 3;           // panel seams
+  for (let i = 10; i < 64; i += 16) { x.beginPath(); x.moveTo(0, i); x.lineTo(64, i); x.stroke(); }
+  x.strokeStyle = '#2e3820'; x.lineWidth = 3;           // a crate band round the rim
+  x.strokeRect(4, 4, 56, 56);
+  x.strokeStyle = '#7d8a5c'; x.lineWidth = 3;           // a stencil rectangle
+  x.strokeRect(16, 22, 32, 20);
+  x.fillStyle = '#6b7850'; x.font = 'bold 15px monospace';
+  x.textAlign = 'center'; x.textBaseline = 'middle';
+  x.fillText('AMMO', 32, 33);
+  x.fillStyle = '#2e3820';                              // corner rivets
+  for (const [nx, ny] of [[9, 9], [55, 9], [9, 55], [55, 55]]) {
+    x.beginPath(); x.arc(nx, ny, 2.6, 0, Math.PI * 2); x.fill();
   }
   const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace;
   return t;
 })();
-const crateSideMat = new THREE.MeshStandardMaterial({ color: 0x6b5232, roughness: 0.95, metalness: 0.05 });
+const crateSideMat = new THREE.MeshStandardMaterial({ color: 0x4a5a35, roughness: 0.95, metalness: 0.05 });
 const CRATES_TARGET = 2;        // the field carries this many, and refills to it
 function spawnCrateAt(x, z) {
   const g = new THREE.Group();
@@ -1115,39 +1166,70 @@ hud.position.set(0, 0.42, -ARENA - 0.28);
 hud.rotation.x = -0.35;
 board.add(hud);
 const perf = { frames: 0, last: performance.now(), fps: 0, msAvg: 0, samples: [] };
+const HUD_W = 512, HUD_H = 256, PAD = 20;
+// Fit a line of text inside a given width by shrinking the type until it fits.
+function fitFont(text, maxPx, avail, weight) {
+  const w = weight || 'bold';
+  let size = maxPx;
+  while (size > 10) {
+    hctx.font = w + ' ' + size + 'px monospace';
+    if (hctx.measureText(text).width <= avail) break;
+    size -= 1;
+  }
+  hctx.font = w + ' ' + size + 'px monospace';
+  return size;
+}
 function drawHUD() {
   const c = hctx;
-  c.clearRect(0, 0, 512, 256);
-  c.fillStyle = 'rgba(3,16,26,0.78)'; c.fillRect(0, 0, 512, 256);
-  c.strokeStyle = '#4fd0ff'; c.lineWidth = 3; c.strokeRect(3, 3, 506, 250);
-  c.fillStyle = '#4fd0ff'; c.font = 'bold 40px monospace';
-  c.fillText('SCORE ' + S.score, 18, 52);
-  c.font = 'bold 30px monospace';
-  c.fillText('LV ' + S.level, 18, 96);
-  c.fillText('KILLS ' + S.kills, 200, 96);
-  c.fillStyle = '#7cffb0';
-  c.fillText('ERA ' + era().year, 18, 140);
+  const INNER = HUD_W - PAD * 2;               // the width any line must live inside
+  c.clearRect(0, 0, HUD_W, HUD_H);
+  c.fillStyle = 'rgba(3,16,26,0.80)'; c.fillRect(0, 0, HUD_W, HUD_H);
+  c.strokeStyle = '#4fd0ff'; c.lineWidth = 3; c.strokeRect(3, 3, HUD_W - 6, HUD_H - 6);
+
+  // rows are laid out from the top with fixed slots, and every line is fitted to width
+  const rows = [
+    { t: 'SCORE ' + S.score,                       max: 40, colour: '#4fd0ff', h: 40 },
+    { t: 'LV ' + S.level + '    KILLS ' + S.kills, max: 30, colour: '#4fd0ff', h: 32 },
+    { t: 'ERA ' + era().year,                      max: 28, colour: '#7cffb0', h: 30 },
+    { t: S.weaponName + (S.shield > 0 ? '  SHIELD x' + S.shield : ''), max: 22, colour: '#ffd24a', h: 24 },
+  ];
+  let y = PAD + 4;
+  for (const r of rows) {
+    const size = fitFont(r.t, r.max, INNER);
+    c.fillStyle = r.colour;
+    c.fillText(r.t, PAD, y + size * 0.8);
+    y += r.h;
+  }
   // xp bar
-  c.strokeStyle = '#7cffb0'; c.lineWidth = 2; c.strokeRect(18, 150, 476, 20);
+  c.strokeStyle = '#7cffb0'; c.lineWidth = 2; c.strokeRect(PAD, y, INNER, 18);
   c.fillStyle = '#7cffb0';
-  c.fillRect(20, 152, 472 * Math.min(1, S.xp / S.xpNeed), 16);
-  // hull as pips
+  c.fillRect(PAD + 2, y + 2, (INNER - 4) * Math.min(1, S.xp / S.xpNeed), 14);
+  y += 18 + 10;
   // damage meter: ten segments, one lost per hit
   const pct = Math.max(0, Math.round(S.hp / S.maxHp * 100));
   const mcol = pct > 60 ? '#7cffb0' : pct > 30 ? '#ffd24a' : '#ff5a4a';
-  c.fillStyle = '#4fd0ff'; c.font = 'bold 24px monospace';
-  c.fillText('HULL', 18, 222);
+  c.fillStyle = '#4fd0ff'; c.font = 'bold 22px monospace';
+  c.fillText('HULL', PAD, y + 18);
+  const segW = (INNER - 110 - 54) / 10;       // leave room for the label and the percentage
   for (let i = 0; i < 10; i++) {
     c.fillStyle = i < S.hp ? mcol : '#203038';
-    c.fillRect(100 + i * 27, 202, 23, 24);
+    c.fillRect(PAD + 100 + i * segW, y, Math.max(4, segW - 4), 22);
   }
-  c.fillStyle = mcol; c.fillText(pct + '%', 380, 222);
-  c.fillStyle = '#ffd24a'; c.font = 'bold 22px monospace';
-  c.fillText(S.weaponName + (S.shield > 0 ? '  SHIELD x' + S.shield : ''), 18, 176);
-  c.fillStyle = '#6fb8c8'; c.font = 'bold 20px monospace';
-  c.fillText(perf.fps + ' FPS  ' + perf.msAvg.toFixed(1) + ' ms', 18, 246);
-  c.fillStyle = '#9fe3ff'; c.font = 'bold 17px monospace';
-  c.fillText('MUSIC ' + (musicMuted ? 'OFF' : 'ON') + '   M', 340, 246);
+  c.fillStyle = mcol; c.font = 'bold 20px monospace';
+  c.textAlign = 'right';
+  c.fillText(pct + '%', HUD_W - PAD, y + 18);
+  c.textAlign = 'left';
+
+  // the bottom line carries two readings, each fitted into its own half
+  const left = perf.fps + ' FPS  ' + perf.msAvg.toFixed(1) + ' ms';
+  const right = 'MUSIC ' + (musicMuted ? 'OFF' : 'ON') + '  M';
+  const half = INNER / 2 - 8;
+  c.fillStyle = '#6fb8c8'; fitFont(left, 20, half);
+  c.fillText(left, PAD, HUD_H - 12);
+  c.fillStyle = '#9fe3ff'; fitFont(right, 20, half);
+  c.textAlign = 'right';
+  c.fillText(right, HUD_W - PAD, HUD_H - 12);
+  c.textAlign = 'left';
   hudTex.needsUpdate = true;
 }
 
@@ -1156,22 +1238,33 @@ let boardPlacedFrames = 0;
 const headPos = new THREE.Vector3();
 renderer.xr.addEventListener('sessionstart', () => { boardPlacedFrames = 0; });
 renderer.xr.addEventListener('sessionend', () => { board.position.set(0, BOARD_Y, -0.95); });
+// every frame after placement, the board's place in the world is its home MINUS the
+// distance it has been carried, which is what puts the plane back in front of you
+function holdBoardUnderPlayer() {
+  if (!renderer.xr.isPresenting) return;
+  if (boardPlacedFrames <= 30 && boardPlacedFrames > 0) boardHome.copy(board.position);
+  board.position.x = boardHome.x - cam.x;
+  board.position.z = boardHome.z - cam.z;
+}
 // Vampire-Survivors style: the plane flies freely inside a frame a good deal
 // larger than the board, and the board only slides when the plane reaches the
 // frame's edge. In the middle, the plane moves and the ground stays put.
-const FRAME_X = 0.62, FRAME_Z = 0.34;      // how far the plane may roam from centre
-const cam = { x: 0, z: 0 };
+// The field scrolls: the plane never hits a wall. The board is carried along beneath
+// the plane, keeping it inside a window centred on the board. The window is a good deal
+// smaller than the board, so you reach the border long before the board runs out.
+const WINDOW_X = 0.62, WINDOW_Z = 0.42;    // half-size of the visible window
+const cam = { x: 0, z: 0 };                // how far the board has been carried
+const boardHome = new THREE.Vector3();     // where the board sits under your head
 function applyZoom() {
   const z = board.userData.zoom || 1;
   board.scale.setScalar(z);
-  // where the plane is, relative to the board, in world metres
   const px = player.position.x * z, pz = player.position.z * z;
-  // push the board the other way only once the plane passes the frame
+  // push the board only once the plane passes the window's edge
   let dx = 0, dz = 0;
-  if (px > FRAME_X) dx = px - FRAME_X;
-  else if (px < -FRAME_X) dx = px + FRAME_X;
-  if (pz > FRAME_Z) dz = pz - FRAME_Z;
-  else if (pz < -FRAME_Z) dz = pz + FRAME_Z;
+  if (px > WINDOW_X) dx = px - WINDOW_X;
+  else if (px < -WINDOW_X) dx = px + WINDOW_X;
+  if (pz > WINDOW_Z) dz = pz - WINDOW_Z;
+  else if (pz < -WINDOW_Z) dz = pz + WINDOW_Z;
   cam.x += dx; cam.z += dz;
   board.position.x -= dx;
   board.position.z -= dz;
@@ -1180,8 +1273,8 @@ function applyZoom() {
 function framePush() {
   const z = board.userData.zoom || 1;
   const px = player.position.x * z, pz = player.position.z * z;
-  return { x: px > FRAME_X ? px - FRAME_X : px < -FRAME_X ? px + FRAME_X : 0,
-           z: pz > FRAME_Z ? pz - FRAME_Z : pz < -FRAME_Z ? pz + FRAME_Z : 0 };
+  return { x: px > WINDOW_X ? px - WINDOW_X : px < -WINDOW_X ? px + WINDOW_X : 0,
+           z: pz > WINDOW_Z ? pz - WINDOW_Z : pz < -WINDOW_Z ? pz + WINDOW_Z : 0 };
 }
 function placeBoardForHead() {
   if (!renderer.xr.isPresenting) return;
@@ -1195,6 +1288,7 @@ function placeBoardForHead() {
   boardPlacedFrames++;
   // 55 cm below your eyes, 85 cm in front: a table you look down on, seated or standing
   board.position.set(headPos.x, Math.max(0.35, headPos.y - 0.55), headPos.z - 0.85);
+  boardHome.copy(board.position);
 }
 
 // ---------- FRAME ----------
@@ -1215,6 +1309,7 @@ function gameFrame() {
 
   placeBoardForHead();
   applyZoom();
+  holdBoardUnderPlayer();
   // Y button (left controller, upper face button) quits to the title screen
   for (const c of controllers) {
     const gp = c.userData.gp;
@@ -1231,10 +1326,7 @@ function gameFrame() {
     const speed = 0.62 * (1 + (S.speedBonus || 0));                       // metres per second on the board
     player.position.x += inp.x * speed * dt;
     player.position.z += inp.z * speed * dt;
-    // the plane roams a frame larger than the board; the board follows at the edges
-    // the plane may reach the frame's edge and no further; the board slides in behind
-    player.position.x = Math.max(-FRAME_X, Math.min(FRAME_X, player.position.x));
-    player.position.z = Math.max(-FRAME_Z, Math.min(FRAME_Z, player.position.z));
+    // no wall and no clamp: the plane flies free, and the board is carried with it
     // the plane faces the way it moves; when still, it keeps its last heading
     if (Math.abs(inp.x) + Math.abs(inp.z) > 0.05) {
       const want = Math.atan2(inp.x, inp.z) + Math.PI;
@@ -1282,8 +1374,9 @@ function gameFrame() {
   // --- bullets ---
   // the painted ground slides only as far as the board has been pushed, so the
   // hills and roads visibly run beneath you when you reach the frame edge
-  grassTex.offset.x = cam.z;
-  grassTex.offset.y = -cam.x;
+  // the ground is painted once, so its texture offset is what shows the motion
+  grassTex.offset.x = cam.z / (ARENA_X * 2);
+  grassTex.offset.y = -cam.x / (ARENA_X * 2);
   if (S.state !== 'play') { renderer.render(scene, camera); return; }
   for (let i = bullets.length - 1; i >= 0; i--) {
     const b = bullets[i];
