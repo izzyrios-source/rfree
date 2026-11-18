@@ -18,7 +18,7 @@
 <div id="help">
 <b>CHRONO ACE: SWARM</b><br>
 VR: left stick = fly &middot; Desktop: WASD / arrows<br>
-Trigger/Space/click = start &middot; Guns fire themselves &middot; triggers/grip or 1/2/3 = upgrades<br>Game over: trigger/C = continue, grip/N = new game &middot; Y or Q = quit &middot; X = re-centre board &middot; M music &middot; Q quit
+Trigger/Space/click = start &middot; Guns fire themselves<br>Right trigger + right stick = zoom &middot; Y or Q = quit &middot; X = re-centre board<br>Game over: trigger/C = continue, grip/N = new game &middot; M music &middot; Q quit
 </div>
 <script type="module">
 
@@ -443,7 +443,7 @@ function toggleMusic() {
 // ---------- GAME STATE ----------
 const S = {
   state: 'title',        // title | play | upgrade | over
-  score: 0, kills: 0, level: 1, xp: 0, xpNeed: 6,
+  score: 0, kills: 0, level: 1, xp: 0, xpNeed: 28,   // level up takes far longer
   hp: 10, maxHp: 10,
   eraIndex: 0, eraTimer: 0, ERASECONDS: 60,
   paused: false, time: 0,
@@ -455,6 +455,19 @@ const S = {
   pierce: 0,
   regen: 0,
   magnet: 0.35,          // how far you hoover up XP gems
+  // weapons you gain as you level
+  sideGuns: 0,           // pairs of guns firing left and right
+  rearGun: 0,            // a gun firing backwards
+  mines: 0,              // mines dropped behind you
+  mineTimer: 0,
+  shield: 0,             // hits absorbed before your hull is touched
+  // fields of fire you inherit per era
+  gunAngle: 0,           // extra fan on the main guns
+  ringShots: 0,          // shots per full circle (0 = none)
+  ringTimer: 0,
+  ringEvery: 3.0,
+  homing: 0,             // 0 off, 1 on for this era
+  weaponName: 'SINGLE GUN',
 };
 
 const player = new THREE.Group();
@@ -476,17 +489,25 @@ playerGlow.scale.set(0.17, 0.17, 1);
 playerGlow.rotation.x = 0;
 player.add(playerGlow);
 
-// a ring of pips around the player shows health at a glance
-const hpRing = new THREE.Mesh(new THREE.RingGeometry(0.036, 0.042, 32),
-  new THREE.MeshBasicMaterial({ color: 0x7cffb0, transparent: true, opacity: 0.85,
-    side: THREE.DoubleSide, depthWrite: false, toneMapped: false }));
-hpRing.rotation.x = -Math.PI / 2;
-hpRing.position.y = 0.035;
-player.add(hpRing);
+// a straight health bar lying just behind the plane, always visible
+const BAR_W = 0.085;
+const BAR_D = 0.011;
+const barBack = new THREE.Mesh(new THREE.PlaneGeometry(BAR_W, BAR_D),
+  new THREE.MeshBasicMaterial({ color: 0x101c22, transparent: true, opacity: 0.8,
+    depthWrite: false, toneMapped: false }));
+barBack.rotation.x = -Math.PI / 2;
+barBack.position.set(0, 0.052, 0.030);
+player.add(barBack);
+const barFill = new THREE.Mesh(new THREE.PlaneGeometry(BAR_W, BAR_D),
+  new THREE.MeshBasicMaterial({ color: 0x7cffb0, depthWrite: false, toneMapped: false }));
+barFill.rotation.x = -Math.PI / 2;
+barFill.position.set(0, 0.053, 0.030);
+player.add(barFill);
 function refreshRing() {
-  const frac = S.hp / S.maxHp;
-  hpRing.material.color.setHex(frac > 0.66 ? 0x7cffb0 : frac > 0.33 ? 0xffd24a : 0xff5a4a);
-  hpRing.scale.setScalar(1);
+  const frac = Math.max(0, S.hp / S.maxHp);
+  barFill.material.color.setHex(frac > 0.6 ? 0x7cffb0 : frac > 0.3 ? 0xffd24a : 0xff5a4a);
+  barFill.scale.x = Math.max(0.001, frac);
+  barFill.position.x = -(BAR_W * (1 - frac)) / 2;   // shrink from the right edge
 }
 
 // ---------- SWARM ----------
@@ -502,12 +523,12 @@ const enemyMats = [
 const enemyTemplates = {};
 function makeSwarmEnemy() {
   const e = era();
-  if (!enemyTemplates[e.year]) {
-    const shape = e.shape === 'futuristic' ? 'saucer' : e.shape;
-    enemyTemplates[e.year] = makeAircraft(shape, e.color, 0.018);
-  }
+  // every era gets its own hull, so levelling changes what you are shooting at
+  const shape = e.shape === 'futuristic' ? 'saucer' : e.shape;
+  const key = shape + ':' + e.color;
+  if (!enemyTemplates[key]) enemyTemplates[key] = makeAircraft(shape, e.color, 0.018);
   const g = new THREE.Group();
-  const m = enemyTemplates[e.year].clone();
+  const m = enemyTemplates[key].clone();
   m.rotation.y = Math.PI;          // nose toward the direction of travel
   g.add(m);
   return g;
@@ -537,20 +558,49 @@ function spawnEnemy() {
 // ---------- FIRING ----------
 const bulletGeo = new THREE.SphereGeometry(0.009, 6, 5);
 const bulletMat = new THREE.MeshBasicMaterial({ color: 0xfff3a0, toneMapped: false });
+const mineGeo = new THREE.SphereGeometry(0.011, 6, 5);
+const mineMat = new THREE.MeshBasicMaterial({ color: 0xff7a4a, toneMapped: false });
+const mines = [];
+// fire one bullet along angle a from the plane
+function bulletAt(a, fromPlayer, spreadDeg) {
+  const dir = new THREE.Vector3(-Math.sin(a), 0, -Math.cos(a));
+  const b = new THREE.Mesh(bulletGeo, bulletMat);
+  b.position.copy(fromPlayer ? player.position : player.position).setY(0.05).addScaledVector(dir, 0.04);
+  board.add(b);
+  bullets.push({ mesh: b, dir, life: 1.4, hits: 0, homing: S.homing });
+}
 function fire() {
-  // the player fires forward, plus one stream per wingman fanned out
+  const base = player.rotation.y;
+  // main guns: one stream per wingman, each widened by the era's gun angle
   const streams = 1 + S.wingmen;
+  const fan = 0.22 + S.gunAngle;
   for (let i = 0; i < streams; i++) {
-    const spread = (i - (streams - 1) / 2) * 0.22;
-    const a = player.rotation.y + spread;
-    const dir = new THREE.Vector3(-Math.sin(a), 0, -Math.cos(a));
-    const b = new THREE.Mesh(bulletGeo, bulletMat);
-    b.position.copy(player.position).setY(0.05).addScaledVector(dir, 0.04);
-    board.add(b);
-    bullets.push({ mesh: b, dir, life: 1.4, hits: 0 });
+    const spread = (i - (streams - 1) / 2) * fan;
+    bulletAt(base + spread, true);
   }
+  // side guns gained by levelling: a matched pair firing straight out
+  for (let i = 0; i < S.sideGuns; i++) {
+    bulletAt(base + Math.PI / 2, true);
+    bulletAt(base - Math.PI / 2, true);
+  }
+  // rear gun
+  if (S.rearGun > 0) bulletAt(base + Math.PI, true);
 }
 let fireTimer = 0;
+
+// a mine sits on the field and bursts when anything comes near
+function dropMine() {
+  const m = new THREE.Mesh(mineGeo, mineMat);
+  m.position.copy(player.position).setY(0.045);
+  board.add(m);
+  mines.push({ mesh: m, born: performance.now(), life: 6000 });
+}
+// the era's ring of fire: a full circle of shots every few seconds
+function ringVolley() {
+  const n = Math.max(6, S.ringShots);
+  for (let i = 0; i < n; i++) bulletAt((i / n) * Math.PI * 2, true);
+  sfxWarp();
+}
 
 // ---------- XP GEMS ----------
 const gemGeo = new THREE.OctahedronGeometry(0.012, 0);
@@ -560,6 +610,48 @@ function dropGem(pos) {
   m.position.copy(pos).setY(0.04);
   board.add(m);
   gems.push({ mesh: m, born: performance.now() });
+}
+
+// ---------- PICKUPS: health and powerups lying on the field ----------
+const PICKUPS = [
+  { id: 'health', color: 0x7cffb0, icon: '+' },
+  { id: 'rapid',  color: 0xffd24a, icon: 'R' },
+  { id: 'spread', color: 0xff9a3a, icon: 'W' },
+  { id: 'shield', color: 0x66d9ff, icon: 'S' },
+  { id: 'magnet', color: 0xd08cff, icon: 'M' },
+  { id: 'mine',   color: 0xff7a4a, icon: 'O' },
+];
+const iconTex = {};
+for (const p of PICKUPS) {
+  const c = document.createElement('canvas'); c.width = c.height = 64;
+  const x = c.getContext('2d');
+  x.fillStyle = 'rgba(6,20,28,0.9)'; x.beginPath(); x.arc(32, 32, 30, 0, Math.PI * 2); x.fill();
+  x.lineWidth = 5; x.strokeStyle = '#' + p.color.toString(16).padStart(6, '0');
+  x.beginPath(); x.arc(32, 32, 27, 0, Math.PI * 2); x.stroke();
+  x.fillStyle = x.strokeStyle; x.font = 'bold 36px monospace';
+  x.textAlign = 'center'; x.textBaseline = 'middle'; x.fillText(p.icon, 32, 35);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace;
+  iconTex[p.id] = t;
+}
+const pickups = [];
+function spawnPickup() {
+  const def = PICKUPS[Math.floor(Math.random() * PICKUPS.length)];
+  const m = new THREE.Sprite(new THREE.SpriteMaterial({ map: iconTex[def.id],
+    transparent: true, depthWrite: false, toneMapped: false }));
+  m.scale.set(0.055, 0.055, 1);
+  m.position.set((Math.random() * 2 - 1) * (ARENA_X - 0.25), 0.06,
+                 (Math.random() * 2 - 1) * (ARENA - 0.25));
+  board.add(m);
+  pickups.push({ mesh: m, id: def.id, born: performance.now() });
+}
+function collectPickup(p) {
+  if (p.id === 'health') { S.hp = Math.min(S.maxHp, S.hp + 4); showBanner('+40% HULL', 1.2); }
+  if (p.id === 'rapid')  { S.fireRate *= 1.25;            showBanner('RAPID FIRE', 1.2); }
+  if (p.id === 'spread') { S.wingmen += 1;                showBanner('EXTRA STREAM', 1.2); }
+  if (p.id === 'shield') { S.shield = Math.min(3, S.shield + 1); showBanner('SHIELD', 1.2); }
+  if (p.id === 'magnet') { S.magnet += 0.15;              showBanner('MAGNET', 1.2); }
+  if (p.id === 'mine')   { S.mines += 1;                  showBanner('MINES +1', 1.2); }
+  refreshRing();
 }
 
 // ---------- EFFECTS ----------
@@ -619,6 +711,20 @@ const controllers = [0, 1].map(i => {
   return c;
 });
 function stickInput() {
+  // right trigger held + right stick = zoom the playfield in and out
+  let zoom = 0;
+  for (const c of controllers) {
+    const gp = c.userData.gp;
+    if (!gp || !gp.axes) continue;
+    const trig = gp.buttons && gp.buttons[0] ? gp.buttons[0].value : 0;
+    if (trig > 0.5 && gp.axes.length >= 4) zoom += gp.axes[3];
+  }
+  if (Math.abs(zoom) > 0.1) {
+    board.userData.zoom = Math.max(0.6, Math.min(2.2, (board.userData.zoom || 1) + zoom * 0.9 * clock.getDelta()));
+  }
+  // keyboard fallback: Z and X
+  if (keys.KeyZ) board.userData.zoom = Math.min(2.2, (board.userData.zoom || 1) + 0.8 * clock.getDelta());
+  if (keys.KeyX) board.userData.zoom = Math.max(0.6, (board.userData.zoom || 1) - 0.8 * clock.getDelta());
   let x = 0, z = 0;
   if (keys.KeyA || keys.ArrowLeft) x -= 1;
   if (keys.KeyD || keys.ArrowRight) x += 1;
@@ -638,6 +744,13 @@ function stickInput() {
 
 // ---------- HP / DAMAGE ----------
 function damagePlayer() {
+  if (S.shield > 0) {                 // a shield takes the hit instead of your hull
+    S.shield--;
+    sfxDamage(); burst(player.position, 0.06);
+    showBanner('SHIELD DOWN', 1.0);
+    player.userData.grace = performance.now() + 900;
+    return;
+  }
   S.hp--;
   refreshRing();
   sfxDamage();
@@ -654,6 +767,18 @@ function damagePlayer() {
   }
 }
 
+// ---------- ERA GUN LOADOUT: each era flies a different way ----------
+function applyEraGuns() {
+  const y = era().year;
+  S.gunAngle = 0; S.ringShots = 0; S.homing = 0; S.ringEvery = 3.0;
+  if (y === 1914) S.weaponName = 'TWIN VICKERS';
+  else if (y === 1944) { S.gunAngle = 0.06; S.weaponName = 'CANNON PAIR'; }
+  else if (y === 1968) { S.homing = 1; S.weaponName = 'HOMING MISSILES'; }
+  else if (y === 1991) { S.ringShots = 8; S.ringEvery = 4.0; S.weaponName = 'RING OF FIRE'; }
+  else { S.ringShots = 12; S.ringEvery = 2.6; S.homing = 1; S.weaponName = 'PLASMA BURST'; }
+  S.ringTimer = 0;
+}
+
 // ---------- UPGRADES ----------
 const UPGRADES = [
   { name: 'RAPID FIRE',  desc: '+35% fire rate',        apply: () => { S.fireRate *= 1.35; } },
@@ -663,16 +788,37 @@ const UPGRADES = [
   { name: 'PIERCE',      desc: 'Shots pass through one more enemy', apply: () => { S.pierce += 1; } },
   { name: 'REPAIR',      desc: 'Damage meter back to 100%', apply: () => { S.hp = S.maxHp; refreshRing(); } },
   { name: 'MAGNET',      desc: 'Collect gems from further away', apply: () => { S.magnet += 0.25; } },
+  { name: 'SIDE GUNS',   desc: 'A matched pair firing left and right', apply: () => { S.sideGuns += 1; S.weaponName = 'CROSSFIRE'; } },
+  { name: 'REAR GUN',    desc: 'A gun covering your tail',       apply: () => { S.rearGun = 1; S.weaponName = 'REAR GUN'; } },
+  { name: 'MINE LAYER',  desc: 'Drop a mine behind you',         apply: () => { S.mines += 1; } },
+  { name: 'SHIELD',      desc: 'Absorb the next hit',            apply: () => { S.shield = Math.min(3, S.shield + 1); } },
+  { name: 'RICHOCHET',   desc: 'Shots carry on through one more plane', apply: () => { S.pierce += 1; } },
+  { name: 'TWIN VICKERS',desc: 'Slower, heavier rounds: +1 damage, +20% fire rate', apply: () => { S.damage += 1; S.fireRate *= 1.2; S.weaponName = 'TWIN VICKERS'; } },
+  { name: 'CANNON PAIR', desc: 'Wider fan of fire: +60% cone, +30% bullet speed', apply: () => { S.gunAngle += 0.13; S.bulletSpeed *= 1.3; S.weaponName = 'CANNON PAIR'; } },
+  { name: 'HOMING MISSILES', desc: 'Your shots now turn toward the nearest plane', apply: () => { S.homing = 1; S.weaponName = 'HOMING MISSILES'; } },
+  { name: 'RING OF FIRE',desc: 'Fire a full circle of shots every few seconds', apply: () => { S.ringShots = Math.max(8, S.ringShots + 4); S.weaponName = 'RING OF FIRE'; } },
+  { name: 'AFTERBURNER', desc: '+25% speed, +15% fire rate', apply: () => { S.speedBonus = (S.speedBonus || 0) + 0.25; S.fireRate *= 1.15; } },
 ];
 let currentChoices = [];
 function offerUpgrades() {
-  S.state = 'upgrade';
-  // three distinct choices, drawn at random
-  const pool = UPGRADES.slice();
-  currentChoices = [];
-  for (let i = 0; i < 3 && pool.length; i++) {
-    currentChoices.push(pool.splice(Math.floor(Math.random() * pool.length), 1)[0]);
-  }
+  S.state = 'upgrade';             // pauses the game: enemies stop while you read
+  // one weapon, one power, one wildcard, so a level always moves you forward
+  const weaponIdx = [5, 7, 11, 12, 13, 14];
+  const powerIdx  = [0, 1, 2, 3, 4, 6, 8];
+  const wildIdx   = UPGRADES.map((u, i) => i);
+  const picked = [];
+  const take = idx => {
+    const free = idx.filter(i => !picked.includes(i));
+    if (!free.length) return;
+    picked.push(free[Math.floor(Math.random() * free.length)]);
+  };
+  take([5, 7]);                    // a starting weapon early
+  take(powerIdx);
+  take(picked.length < 2 ? weaponIdx : wildIdx);
+  take(wildIdx);
+  currentChoices = picked.map(i => UPGRADES[i]).filter(Boolean);
+  renderText('LEVEL UP', 'Hull ' + Math.round(S.hp / S.maxHp * 100) + '% &middot; ' + S.weaponName +
+    '<br>Pick one: trigger 1/2, 3 = grip<br>or press 1, 2, 3');
   const buttons = currentChoices.map((u, i) =>
     '<div class="upg"><b>' + (i + 1) + '. ' + u.name + '</b><br>' + u.desc + '</div>').join('');
   renderPanel('LEVEL ' + S.level, buttons);
@@ -714,8 +860,13 @@ function startRun() {
   enemies.length = 0; gems.length = 0; bullets.length = 0; sparks.length = 0;
   // reset the run
   S.state = 'play'; S.score = 0; S.kills = 0; S.level = 1; S.xp = 0; S.xpNeed = 6;
-  S.maxHp = 10; S.hp = 10; S.eraIndex = 0; S.eraTimer = 0; S.time = 0;
+  S.maxHp = 10; S.hp = 10; S.eraIndex = 0; S.eraTimer = 0; S.time = 0; S.xpNeed = 28;
+  for (const m of mines) board.remove(m.mesh);
+  for (const p of pickups) board.remove(p.mesh);
+  mines.length = 0; pickups.length = 0;
   S.fireRate = 2.6; S.damage = 1; S.bulletSpeed = 4.2; S.wingmen = 0; S.pierce = 0; S.magnet = 0.35;
+  S.sideGuns = 0; S.rearGun = 0; S.mines = 0; S.shield = 0; S.speedBonus = 0;
+  S.ringShots = 0; S.ringTimer = 0; S.homing = 0; S.weaponName = 'SINGLE GUN';
   player.position.set(0, 0.04, 0.1);
   refreshRing();
   renderPanel('', '');
@@ -818,9 +969,9 @@ function drawHUD() {
   c.fillStyle = '#7cffb0';
   c.fillText('ERA ' + era().year, 18, 140);
   // xp bar
-  c.strokeStyle = '#7cffb0'; c.lineWidth = 2; c.strokeRect(18, 160, 476, 26);
+  c.strokeStyle = '#7cffb0'; c.lineWidth = 2; c.strokeRect(18, 150, 476, 20);
   c.fillStyle = '#7cffb0';
-  c.fillRect(20, 162, 472 * Math.min(1, S.xp / S.xpNeed), 22);
+  c.fillRect(20, 152, 472 * Math.min(1, S.xp / S.xpNeed), 16);
   // hull as pips
   // damage meter: ten segments, one lost per hit
   const pct = Math.max(0, Math.round(S.hp / S.maxHp * 100));
@@ -832,6 +983,8 @@ function drawHUD() {
     c.fillRect(100 + i * 27, 202, 23, 24);
   }
   c.fillStyle = mcol; c.fillText(pct + '%', 380, 222);
+  c.fillStyle = '#ffd24a'; c.font = 'bold 22px monospace';
+  c.fillText(S.weaponName + (S.shield > 0 ? '  SHIELD x' + S.shield : ''), 18, 176);
   c.fillStyle = '#6fb8c8'; c.font = 'bold 20px monospace';
   c.fillText(perf.fps + ' FPS  ' + perf.msAvg.toFixed(1) + ' ms', 18, 246);
   c.fillStyle = '#9fe3ff'; c.font = 'bold 17px monospace';
@@ -844,6 +997,10 @@ let boardPlacedFrames = 0;
 const headPos = new THREE.Vector3();
 renderer.xr.addEventListener('sessionstart', () => { boardPlacedFrames = 0; });
 renderer.xr.addEventListener('sessionend', () => { board.position.set(0, BOARD_Y, -0.95); });
+function applyZoom() {
+  const z = board.userData.zoom || 1;
+  board.scale.setScalar(z);
+}
 function placeBoardForHead() {
   if (!renderer.xr.isPresenting) return;
   for (const c of controllers) {           // Y or B re-centres the board
@@ -875,6 +1032,7 @@ function gameFrame() {
   const now = performance.now();
 
   placeBoardForHead();
+  applyZoom();
   // Y button (left controller, upper face button) quits to the title screen
   for (const c of controllers) {
     const gp = c.userData.gp;
@@ -888,7 +1046,7 @@ function gameFrame() {
 
     // --- move the player, clamped to the board ---
     const inp = stickInput();
-    const speed = 0.62;                       // metres per second on the board
+    const speed = 0.62 * (1 + (S.speedBonus || 0));                       // metres per second on the board
     player.position.x += inp.x * speed * dt;
     player.position.z += inp.z * speed * dt;
     const lim = ARENA - 0.05, limX = ARENA_X - 0.05;
@@ -906,6 +1064,16 @@ function gameFrame() {
     // --- auto-fire ---
     fireTimer -= dt;
     if (fireTimer <= 0) { fireTimer = 1 / S.fireRate; fire(); }
+    // --- mines laid behind you ---
+    S.mineTimer -= dt;
+    if (S.mines > 0 && S.mineTimer <= 0) { S.mineTimer = 2.4; dropMine(); }
+    // --- the era's ring of fire ---
+    if (S.ringShots > 0) {
+      S.ringTimer -= dt;
+      if (S.ringTimer <= 0) { S.ringTimer = S.ringEvery; ringVolley(); }
+    }
+    // --- bonuses appear across the field ---
+    if (Math.random() < dt * 0.45) spawnPickup();
 
     // --- swarms ramp with level and era ---
     const spawnRate = 3 + S.level * 1.1 + S.eraIndex * 1.5;
@@ -915,6 +1083,7 @@ function gameFrame() {
     if (S.eraTimer >= S.ERASECONDS) {
       S.eraTimer = 0;
       S.eraIndex = (S.eraIndex + 1) % ERAS.length;
+      applyEraGuns();
       playTrackForEra(era().year);
       showBanner('ERA ' + era().year, 2.2);
       sfxWarp();
@@ -922,9 +1091,22 @@ function gameFrame() {
   }
 
   // --- bullets ---
+  grassTex.offset.x = player.position.z * 0.5;   // the ground runs under the plane
+  if (S.state !== 'play') { renderer.render(scene, camera); return; }
   for (let i = bullets.length - 1; i >= 0; i--) {
     const b = bullets[i];
     b.life -= dt;
+    if (b.homing && enemies.length) {          // homing shots curve toward the nearest plane
+      let best = null, bd = 0.55;
+      for (const e of enemies) {
+        const dd = b.mesh.position.distanceTo(e.mesh.position);
+        if (dd < bd) { bd = dd; best = e; }
+      }
+      if (best) {
+        tmpV.copy(best.mesh.position).sub(b.mesh.position); tmpV.y = 0;
+        if (tmpV.lengthSq() > 0) b.dir.lerp(tmpV.normalize(), Math.min(1, 2.4 * dt)).normalize();
+      }
+    }
     b.mesh.position.addScaledVector(b.dir, S.bulletSpeed * dt);
     const out = Math.abs(b.mesh.position.x) > ARENA_X + 0.1 || Math.abs(b.mesh.position.z) > ARENA + 0.1;
     if (b.life <= 0 || out) { board.remove(b.mesh); bullets.splice(i, 1); continue; }
@@ -967,6 +1149,41 @@ function gameFrame() {
     }
   }
 
+  // --- mines: rest, then burst when a plane comes near ---
+  for (let i = mines.length - 1; i >= 0; i--) {
+    const m = mines[i];
+    if (now - m.born > m.life) { board.remove(m.mesh); mines.splice(i, 1); continue; }
+    m.mesh.material.opacity = 0.55 + Math.sin(now / 140) * 0.35;
+    for (let k = enemies.length - 1; k >= 0; k--) {
+      const e = enemies[k];
+      if (e.mesh.position.distanceTo(m.mesh.position) < 0.075) {
+        burst(m.mesh.position.clone(), 0.05);
+        board.remove(m.mesh); mines.splice(i, 1);
+        board.remove(e.mesh);
+        if (e.hp - S.damage <= 0) { dropGem(e.mesh.position.clone()); S.kills++; S.score += 10; }
+        enemies.splice(k, 1);
+        break;
+      }
+    }
+  }
+
+  // --- bonuses: drift a little, collect on touch ---
+  for (let i = pickups.length - 1; i >= 0; i--) {
+    const p = pickups[i];
+    const age = (now - p.born) / 1000;
+    p.mesh.position.y = 0.06 + Math.sin(now / 320 + i) * 0.012;
+    tmpV.copy(player.position).sub(p.mesh.position); tmpV.y = 0;
+    const dd = tmpV.length();
+    if (dd < S.magnet * 1.6 && dd > 0.0001) {
+      tmpV.divideScalar(dd);
+      p.mesh.position.addScaledVector(tmpV, 0.5 * dt);
+    }
+    if (age > 22 || dd < 0.05) {
+      if (dd < 0.05) { collectPickup(p); sfxWarp(); }
+      board.remove(p.mesh); pickups.splice(i, 1);
+    }
+  }
+
   // --- gems: drift to the player and level you up ---
   for (let i = gems.length - 1; i >= 0; i--) {
     const g = gems[i];
@@ -980,8 +1197,12 @@ function gameFrame() {
       board.remove(g.mesh); gems.splice(i, 1);
       S.xp++;
       if (S.xp >= S.xpNeed) {
-        S.xp = 0; S.xpNeed = Math.floor(S.xpNeed * 1.45) + 2;
+        S.xp = 0; S.xpNeed = Math.floor(S.xpNeed * 1.7) + 8;
         S.level++;
+        // every level, the era moves on: new enemy planes and often a new gun
+        S.eraIndex = (S.eraIndex + 1) % ERAS.length;
+        applyEraGuns();
+        playTrackForEra(era().year);
         offerUpgrades();
       }
     }
