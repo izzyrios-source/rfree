@@ -1292,9 +1292,9 @@ function drawHUD() {
 
   // diagnostic line, shown while the two shoulder buttons are held
   if (DIAG.shown) {
-    const d = 'cam ' + cam.x.toFixed(2) + ',' + cam.z.toFixed(2) +
-              '  field ' + field.position.x.toFixed(2) + ',' + field.position.z.toFixed(2) +
-              '  plane ' + player.position.x.toFixed(2) + ',' + player.position.z.toFixed(2);
+    const d = 'plane ' + player.position.x.toFixed(3) + ',' + player.position.z.toFixed(3) +
+              '  field ' + field.position.x.toFixed(3) + ',' + field.position.z.toFixed(3) +
+              '  tray ' + board.position.x.toFixed(2) + ',' + board.position.z.toFixed(2);
     c.fillStyle = '#ffb0b0'; fitFont(d, 18, INNER);
     c.fillText(d, PAD, HUD_H - 34);
   }
@@ -1337,15 +1337,16 @@ const BOUND_X = 0.86, BOUND_Z = 0.50;      // the plane is kept inside the visib
 const WINDOW_X = 0.0, WINDOW_Z = 0.0;      // VS-style: the field is centred on the plane
 const cam = { x: 0, z: 0 };                // how far the board has been carried
 const boardHome = new THREE.Vector3();     // where the board sits under your head
-const DIAG = { dx: 0, dz: 0, runs: 0, shown: false };
+const DIAG = { px: 0, pz: 0, runs: 0, shown: false };
 function applyZoom() {
   const z = board.userData.zoom || 1;
   board.scale.setScalar(z);
-  // The plane's own x/z are measured against the field's centre, and the frame loop has
-  // already moved the field by the same step the plane took — so put the plane back on the
-  // middle. The plane keeps its place in front of you; the world is what travels.
-  player.position.x = 0;
-  player.position.z = 0;
+  // The field goes exactly where the plane went. Both end up in the same place, so the
+  // plane appears to hold station in front of you and the world travels instead. The tray
+  // and the readout sit on the static stage and are never touched.
+  field.position.x = -player.position.x;
+  field.position.z = -player.position.z;
+  cam.x = player.position.x; cam.z = player.position.z;
 }
 // the bank angle reads the field's motion, so the plane leans into a push
 function framePush() {
@@ -1411,13 +1412,10 @@ function gameFrame() {
 
     // --- move the player, clamped to the board ---
     const inp = stickInput();
-    const speed = 0.62 * (1 + (S.speedBonus || 0));        // metres per second, world units
-    // One step, on the world's axes, applied to the field. The plane keeps its place.
-    const stepX = inp.x * speed * dt, stepZ = inp.z * speed * dt;
-    cam.x += stepX; cam.z += stepZ;
-    field.position.x -= stepX;
-    field.position.z -= stepZ;
-    DIAG.dx = stepX; DIAG.dz = stepZ; DIAG.runs++;
+    const speed = 0.62 * (1 + (S.speedBonus || 0));
+    player.position.x += inp.x * speed * dt;
+    player.position.z += inp.z * speed * dt;
+    DIAG.px = player.position.x; DIAG.pz = player.position.z; DIAG.runs++;
     // the plane faces the way it moves; when still, it keeps its last heading
     if (Math.abs(inp.x) + Math.abs(inp.z) > 0.05) {
       const want = Math.atan2(inp.x, inp.z) + Math.PI;
