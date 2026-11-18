@@ -18,7 +18,7 @@
 <div id="help">
 <b>CHRONO ACE: SWARM</b><br>
 VR: left stick = fly &middot; Desktop: WASD / arrows<br>
-Trigger/Space/click = start &middot; Guns fire themselves &middot; 1/2/3 or triggers/grip = upgrades &middot; Y/B = re-centre board &middot; M music &middot; Q quit
+Trigger/Space/click = start &middot; Guns fire themselves &middot; triggers/grip or 1/2/3 = upgrades<br>Game over: trigger/C = continue, grip/N = new game &middot; Y or Q = quit &middot; X = re-centre board &middot; M music &middot; Q quit
 </div>
 <script type="module">
 
@@ -67,27 +67,55 @@ addEventListener('resize', () => {
 
 // ---------- THE BOARD ----------
 // A square arena about two metres across, floating at waist height in front of you.
-const ARENA = 1.0;                 // half-width in world metres
+const ARENA = 1.0;                 // half-depth in world metres
+const ARENA_X = 1.6;               // half-width: the field is wider than it is deep
 const BOARD_Y = 1.02;              // height of the board above the floor
 const board = new THREE.Group();
 board.position.set(0, BOARD_Y, -0.95);
 rig.add(board);
 
 const boardMat = new THREE.MeshStandardMaterial({ color: 0x1d3348, roughness: 0.9, metalness: 0.1 });
-const boardMesh = new THREE.Mesh(new THREE.BoxGeometry(ARENA * 2, 0.05, ARENA * 2), boardMat);
+const boardMesh = new THREE.Mesh(new THREE.BoxGeometry(ARENA_X * 2, 0.05, ARENA * 2), boardMat);
 board.add(boardMesh);
 // a raised lip around the edge, so the arena reads as a physical tray
 const lipMat = new THREE.MeshStandardMaterial({ color: 0x2c4a63, roughness: 0.6, metalness: 0.4 });
-for (const [w, d, x, z] of [[ARENA*2+0.08, 0.05, 0, ARENA], [ARENA*2+0.08, 0.05, 0, -ARENA],
-                             [0.05, ARENA*2+0.08, ARENA, 0], [0.05, ARENA*2+0.08, -ARENA, 0]]) {
+for (const [w, d, x, z] of [[ARENA_X*2+0.08, 0.05, 0, ARENA], [ARENA_X*2+0.08, 0.05, 0, -ARENA],
+                             [0.05, ARENA*2+0.08, ARENA_X, 0], [0.05, ARENA*2+0.08, -ARENA_X, 0]]) {
   const e = new THREE.Mesh(new THREE.BoxGeometry(w, 0.07, d), lipMat);
   e.position.set(x, 0.03, z);
   board.add(e);
 }
-// a faint grid on the board surface, for a sense of scale and motion
-const grid = new THREE.GridHelper(ARENA * 2, 16, 0x3d6a8f, 0x2a4c66);
-grid.position.y = 0.028;
-board.add(grid);
+// a grass field painted on a canvas: mottled greens plus thousands of blade strokes
+const grassTex = (() => {
+  const c = document.createElement('canvas'); c.width = c.height = 512;
+  const x = c.getContext('2d');
+  x.fillStyle = '#3f7a2c'; x.fillRect(0, 0, 512, 512);
+  for (let i = 0; i < 260; i++) {           // soft patches of lighter and darker turf
+    const px = Math.random() * 512, py = Math.random() * 512, r = 20 + Math.random() * 60;
+    const g = x.createRadialGradient(px, py, 0, px, py, r);
+    const col = Math.random() < 0.5 ? '70,130,45' : '40,90,28';
+    g.addColorStop(0, 'rgba(' + col + ',0.35)'); g.addColorStop(1, 'rgba(' + col + ',0)');
+    x.fillStyle = g; x.fillRect(px - r, py - r, r * 2, r * 2);
+  }
+  for (let i = 0; i < 14000; i++) {         // individual blades
+    const px = Math.random() * 512, py = Math.random() * 512, l = 2 + Math.random() * 5;
+    const v = 90 + Math.random() * 90;
+    x.strokeStyle = 'rgba(' + (v * 0.45 | 0) + ',' + (v | 0) + ',' + (v * 0.3 | 0) + ',0.8)';
+    x.lineWidth = 1;
+    x.beginPath(); x.moveTo(px, py); x.lineTo(px + (Math.random() - 0.5) * 2, py - l); x.stroke();
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.repeat.set(ARENA_X * 2, ARENA * 2);
+  t.anisotropy = 4;
+  return t;
+})();
+const grass = new THREE.Mesh(new THREE.PlaneGeometry(ARENA_X * 2, ARENA * 2),
+  new THREE.MeshStandardMaterial({ map: grassTex, roughness: 0.95, metalness: 0 }));
+grass.rotation.x = -Math.PI / 2;
+grass.position.y = 0.0255;
+board.add(grass);
 
 const ERAS = [
   { year: 1914, top: 0x3d7fd1, horizon: 0xdcefff, bottom: 0x3c5a34, sun: 0xfff3d6, sunDir: [0.4, 0.5, -0.8], cloud: 0xffffff, shade: 0xc9d3de, color: 0x9b7a48, speed: 20, shape: 'biplane' },
@@ -416,7 +444,7 @@ function toggleMusic() {
 const S = {
   state: 'title',        // title | play | upgrade | over
   score: 0, kills: 0, level: 1, xp: 0, xpNeed: 6,
-  hp: 3, maxHp: 3,
+  hp: 10, maxHp: 10,
   eraIndex: 0, eraTimer: 0, ERASECONDS: 60,
   paused: false, time: 0,
   // upgrade stats
@@ -431,7 +459,7 @@ const S = {
 
 const player = new THREE.Group();
 board.add(player);
-let playerMesh = makeAircraft('futuristic', 0x8fd0ff, 0.034);
+let playerMesh = makeAircraft('futuristic', 0x8fd0ff, 0.024);
 player.add(playerMesh);
 // a soft glow under the player, so you never lose it in a swarm
 const glowTex = (() => {
@@ -444,12 +472,12 @@ const glowTex = (() => {
 })();
 const playerGlow = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTex, transparent: true,
   depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false }));
-playerGlow.scale.set(0.24, 0.24, 1);
+playerGlow.scale.set(0.17, 0.17, 1);
 playerGlow.rotation.x = 0;
 player.add(playerGlow);
 
 // a ring of pips around the player shows health at a glance
-const hpRing = new THREE.Mesh(new THREE.RingGeometry(0.05, 0.058, 32),
+const hpRing = new THREE.Mesh(new THREE.RingGeometry(0.036, 0.042, 32),
   new THREE.MeshBasicMaterial({ color: 0x7cffb0, transparent: true, opacity: 0.85,
     side: THREE.DoubleSide, depthWrite: false, toneMapped: false }));
 hpRing.rotation.x = -Math.PI / 2;
@@ -476,7 +504,7 @@ function makeSwarmEnemy() {
   const e = era();
   if (!enemyTemplates[e.year]) {
     const shape = e.shape === 'futuristic' ? 'saucer' : e.shape;
-    enemyTemplates[e.year] = makeAircraft(shape, e.color, 0.026);
+    enemyTemplates[e.year] = makeAircraft(shape, e.color, 0.018);
   }
   const g = new THREE.Group();
   const m = enemyTemplates[e.year].clone();
@@ -491,12 +519,13 @@ const bullets = [];
 function spawnEnemy() {
   // spawn just outside the board edge, so they pour in from all sides
   const edge = Math.floor(Math.random() * 4);
-  const t = (Math.random() * 2 - 1) * (ARENA + 0.12);
+  const tx = (Math.random() * 2 - 1) * (ARENA_X + 0.12);
+  const tz = (Math.random() * 2 - 1) * (ARENA + 0.12);
   let x, z;
-  if (edge === 0) { x = t; z = -(ARENA + 0.12); }
-  else if (edge === 1) { x = t; z = ARENA + 0.12; }
-  else if (edge === 2) { x = -(ARENA + 0.12); z = t; }
-  else { x = ARENA + 0.12; z = t; }
+  if (edge === 0) { x = tx; z = -(ARENA + 0.12); }
+  else if (edge === 1) { x = tx; z = ARENA + 0.12; }
+  else if (edge === 2) { x = -(ARENA_X + 0.12); z = tz; }
+  else { x = ARENA_X + 0.12; z = tz; }
   const mat = enemyMats[S.eraIndex % enemyMats.length];
   const mesh = makeSwarmEnemy();
   mesh.position.set(x, 0.045, z);
@@ -568,10 +597,11 @@ addEventListener('keydown', e => {
     pickUpgrade(parseInt(e.code.slice(5), 10) - 1);
   }
   if (S.state === 'title' && (e.code === 'Space' || e.code === 'Enter')) startRun();
-  if (S.state === 'over' && (e.code === 'Space' || e.code === 'Enter')) startRun();
+  if (S.state === 'over' && (e.code === 'Space' || e.code === 'Enter' || e.code === 'KeyC')) continueRun();
+  if (S.state === 'over' && e.code === 'KeyN') startRun();
 });
 addEventListener('keyup', e => { keys[e.code] = false; });
-renderer.domElement.addEventListener('click', () => { initAudio(); if (S.state === 'title' || S.state === 'over') startRun(); });
+renderer.domElement.addEventListener('click', () => { initAudio(); if (S.state === 'title') startRun(); else if (S.state === 'over') continueRun(); });
 
 // VR controllers drive the same movement
 const controllers = [0, 1].map(i => {
@@ -581,10 +611,11 @@ const controllers = [0, 1].map(i => {
   c.addEventListener('disconnected', () => { c.userData.gp = null; });
   c.addEventListener('selectstart', () => {
     initAudio();
-    if (S.state === 'title' || S.state === 'over') { startRun(); return; }
+    if (S.state === 'title') { startRun(); return; }
+    if (S.state === 'over') { continueRun(); return; }
     if (S.state === 'upgrade') pickUpgrade((c.userData.hand || (i === 0 ? 'left' : 'right')) === 'left' ? 0 : 1);
   });
-  c.addEventListener('squeezestart', () => { if (S.state === 'upgrade') pickUpgrade(2); });
+  c.addEventListener('squeezestart', () => { if (S.state === 'upgrade') pickUpgrade(2); else if (S.state === 'over') startRun(); });
   return c;
 });
 function stickInput() {
@@ -615,7 +646,8 @@ function damagePlayer() {
     S.state = 'over';
     sfxAlarm(3, 400, 120);
     musicStop(); stopRealMusic();
-    renderText('GAME OVER', 'Score ' + S.score + ' &middot; Level ' + S.level + '<br>Pull a trigger (or press Space) to start again');
+    renderText('GAME OVER', 'Score ' + S.score + ' - Level ' + S.level +
+      '<br>TRIGGER or C = CONTINUE (keep level, score halved)<br>GRIP or N = NEW GAME');
   } else {
     // brief grace so you are not hit twice by the same crush
     player.userData.grace = performance.now() + 900;
@@ -629,7 +661,7 @@ const UPGRADES = [
   { name: 'VELOCITY',    desc: '+25% bullet speed',     apply: () => { S.bulletSpeed *= 1.25; } },
   { name: 'WINGMAN',     desc: '+1 firing stream',      apply: () => { S.wingmen += 1; } },
   { name: 'PIERCE',      desc: 'Shots pass through one more enemy', apply: () => { S.pierce += 1; } },
-  { name: 'ARMOUR',      desc: '+1 max hull, fully repaired', apply: () => { S.maxHp += 1; S.hp = S.maxHp; refreshRing(); } },
+  { name: 'REPAIR',      desc: 'Damage meter back to 100%', apply: () => { S.hp = S.maxHp; refreshRing(); } },
   { name: 'MAGNET',      desc: 'Collect gems from further away', apply: () => { S.magnet += 0.25; } },
 ];
 let currentChoices = [];
@@ -662,6 +694,17 @@ let frame = 0;
 let lastError = null;
 const tmpV = new THREE.Vector3();
 
+function continueRun() {
+  for (const e of enemies) board.remove(e.mesh);
+  for (const b of bullets) board.remove(b.mesh);
+  enemies.length = 0; bullets.length = 0;
+  S.hp = S.maxHp; S.score = Math.floor(S.score / 2); S.continues = (S.continues || 0) + 1;
+  S.state = 'play';
+  player.userData.grace = performance.now() + 2000;
+  refreshRing(); renderPanel('', '');
+  playTrackForEra(era().year);
+  showBanner('CONTINUE', 1.6);
+}
 function startRun() {
   // clear the board
   for (const e of enemies) board.remove(e.mesh);
@@ -671,7 +714,7 @@ function startRun() {
   enemies.length = 0; gems.length = 0; bullets.length = 0; sparks.length = 0;
   // reset the run
   S.state = 'play'; S.score = 0; S.kills = 0; S.level = 1; S.xp = 0; S.xpNeed = 6;
-  S.maxHp = 3; S.hp = 3; S.eraIndex = 0; S.eraTimer = 0; S.time = 0;
+  S.maxHp = 10; S.hp = 10; S.eraIndex = 0; S.eraTimer = 0; S.time = 0;
   S.fireRate = 2.6; S.damage = 1; S.bulletSpeed = 4.2; S.wingmen = 0; S.pierce = 0; S.magnet = 0.35;
   player.position.set(0, 0.04, 0.1);
   refreshRing();
@@ -779,12 +822,16 @@ function drawHUD() {
   c.fillStyle = '#7cffb0';
   c.fillRect(20, 162, 472 * Math.min(1, S.xp / S.xpNeed), 22);
   // hull as pips
-  c.fillStyle = '#4fd0ff'; c.font = 'bold 26px monospace';
-  c.fillText('HULL', 18, 220);
-  for (let i = 0; i < S.maxHp; i++) {
-    c.fillStyle = i < S.hp ? '#7cffb0' : '#204040';
-    c.beginPath(); c.arc(130 + i * 34, 210, 12, 0, Math.PI * 2); c.fill();
+  // damage meter: ten segments, one lost per hit
+  const pct = Math.max(0, Math.round(S.hp / S.maxHp * 100));
+  const mcol = pct > 60 ? '#7cffb0' : pct > 30 ? '#ffd24a' : '#ff5a4a';
+  c.fillStyle = '#4fd0ff'; c.font = 'bold 24px monospace';
+  c.fillText('HULL', 18, 222);
+  for (let i = 0; i < 10; i++) {
+    c.fillStyle = i < S.hp ? mcol : '#203038';
+    c.fillRect(100 + i * 27, 202, 23, 24);
   }
+  c.fillStyle = mcol; c.fillText(pct + '%', 380, 222);
   c.fillStyle = '#6fb8c8'; c.font = 'bold 20px monospace';
   c.fillText(perf.fps + ' FPS  ' + perf.msAvg.toFixed(1) + ' ms', 18, 246);
   c.fillStyle = '#9fe3ff'; c.font = 'bold 17px monospace';
@@ -801,7 +848,7 @@ function placeBoardForHead() {
   if (!renderer.xr.isPresenting) return;
   for (const c of controllers) {           // Y or B re-centres the board
     const gp = c.userData.gp;
-    if (gp && gp.buttons && ((gp.buttons[4] && gp.buttons[4].pressed) || (gp.buttons[5] && gp.buttons[5].pressed))) boardPlacedFrames = 0;
+    if (gp && gp.buttons && gp.buttons[4] && gp.buttons[4].pressed) boardPlacedFrames = 0;
   }
   if (boardPlacedFrames > 30) return;
   renderer.xr.getCamera().getWorldPosition(headPos);
@@ -828,6 +875,13 @@ function gameFrame() {
   const now = performance.now();
 
   placeBoardForHead();
+  // Y button (left controller, upper face button) quits to the title screen
+  for (const c of controllers) {
+    const gp = c.userData.gp;
+    const y = !!(gp && c.userData.hand === 'left' && gp.buttons && gp.buttons[5] && gp.buttons[5].pressed);
+    if (y && !c.userData.yWas && S.state !== 'title') quit();
+    c.userData.yWas = y;
+  }
   if (S.state === 'play') {
     S.time += dt;
     S.eraTimer += dt;
@@ -837,8 +891,8 @@ function gameFrame() {
     const speed = 0.62;                       // metres per second on the board
     player.position.x += inp.x * speed * dt;
     player.position.z += inp.z * speed * dt;
-    const lim = ARENA - 0.05;
-    player.position.x = Math.max(-lim, Math.min(lim, player.position.x));
+    const lim = ARENA - 0.05, limX = ARENA_X - 0.05;
+    player.position.x = Math.max(-limX, Math.min(limX, player.position.x));
     player.position.z = Math.max(-lim, Math.min(lim, player.position.z));
     // the plane faces the way it moves; when still, it keeps its last heading
     if (Math.abs(inp.x) + Math.abs(inp.z) > 0.05) {
@@ -872,7 +926,7 @@ function gameFrame() {
     const b = bullets[i];
     b.life -= dt;
     b.mesh.position.addScaledVector(b.dir, S.bulletSpeed * dt);
-    const out = Math.abs(b.mesh.position.x) > ARENA + 0.1 || Math.abs(b.mesh.position.z) > ARENA + 0.1;
+    const out = Math.abs(b.mesh.position.x) > ARENA_X + 0.1 || Math.abs(b.mesh.position.z) > ARENA + 0.1;
     if (b.life <= 0 || out) { board.remove(b.mesh); bullets.splice(i, 1); continue; }
     // hit test
     for (let k = enemies.length - 1; k >= 0; k--) {
