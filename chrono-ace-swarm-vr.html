@@ -18,7 +18,7 @@
 <div id="help">
 <b>CHRONO ACE: SWARM</b><br>
 VR: left stick = fly &middot; Desktop: WASD / arrows<br>
-Guns fire themselves &middot; 1/2/3 pick upgrades &middot; M music &middot; Q quit
+Trigger/Space/click = start &middot; Guns fire themselves &middot; 1/2/3 or triggers/grip = upgrades &middot; Y/B = re-centre board &middot; M music &middot; Q quit
 </div>
 <script type="module">
 
@@ -563,13 +563,20 @@ addEventListener('keydown', e => {
   if (S.state === 'over' && (e.code === 'Space' || e.code === 'Enter')) startRun();
 });
 addEventListener('keyup', e => { keys[e.code] = false; });
+renderer.domElement.addEventListener('click', () => { initAudio(); if (S.state === 'title' || S.state === 'over') startRun(); });
 
 // VR controllers drive the same movement
 const controllers = [0, 1].map(i => {
   const c = renderer.xr.getController(i);
   rig.add(c);
-  c.addEventListener('connected', e => { c.userData.gp = e.data.gamepad; });
+  c.addEventListener('connected', e => { c.userData.gp = e.data.gamepad; c.userData.hand = e.data.handedness; });
   c.addEventListener('disconnected', () => { c.userData.gp = null; });
+  c.addEventListener('selectstart', () => {
+    initAudio();
+    if (S.state === 'title' || S.state === 'over') { startRun(); return; }
+    if (S.state === 'upgrade') pickUpgrade((c.userData.hand || (i === 0 ? 'left' : 'right')) === 'left' ? 0 : 1);
+  });
+  c.addEventListener('squeezestart', () => { if (S.state === 'upgrade') pickUpgrade(2); });
   return c;
 });
 function stickInput() {
@@ -600,7 +607,7 @@ function damagePlayer() {
     S.state = 'over';
     sfxAlarm(3, 400, 120);
     musicStop(); stopRealMusic();
-    renderText('GAME OVER', 'Score ' + S.score + ' &middot; Level ' + S.level + '<br>Press FIRE to start again');
+    renderText('GAME OVER', 'Score ' + S.score + ' &middot; Level ' + S.level + '<br>Pull a trigger (or press Space) to start again');
   } else {
     // brief grace so you are not hit twice by the same crush
     player.userData.grace = performance.now() + 900;
@@ -669,7 +676,7 @@ function startRun() {
 function quit() {
   S.state = 'title';
   musicStop(); stopRealMusic();
-  renderText('CHRONO ACE: SWARM', 'Fly with the stick. Your guns fire themselves.<br>Collect gems, take upgrades, survive.<br><br>Press FIRE to launch');
+  renderText('CHRONO ACE: SWARM', 'Fly with the stick. Your guns fire themselves.<br>Collect gems, take upgrades, survive.<br><br>Pull a trigger (or press Space) to launch');
 }
 
 // ---------- ON-SCREEN PANELS (flat screen only; VR uses the wrist console) ----------
@@ -684,6 +691,9 @@ banner.style.cssText = 'position:fixed;left:0;right:0;top:22%;text-align:center;
   'z-index:7;opacity:0;text-shadow:0 3px 18px #000';
 document.body.appendChild(banner);
 function renderPanel(title, buttons) {
+  if (!title) vrShow([]);
+  else vrShow(['LEVEL UP - ' + title].concat(
+    currentChoices.map((u, i) => ['LEFT TRIGGER', 'RIGHT TRIGGER', 'GRIP'][i] + ': ' + u.name + ' (' + u.desc + ')')));
   panel.innerHTML = title
     ? '<div style="font-size:15px;letter-spacing:0.4em;opacity:0.8">UPGRADE</div>' +
       '<div style="font-size:44px;font-weight:bold;margin:6px 0 18px">' + title + '</div>' + buttons +
@@ -694,7 +704,38 @@ function renderPanel(title, buttons) {
       'font-size:17px;background:rgba(10,30,45,0.8);min-width:340px';
   });
 }
+
+// ---------- VR PANEL: the same messages on a board floating above the arena ----------
+const vrCanvas = document.createElement('canvas');
+vrCanvas.width = 1024; vrCanvas.height = 512;
+const vctx = vrCanvas.getContext('2d');
+const vrTex = new THREE.CanvasTexture(vrCanvas);
+vrTex.colorSpace = THREE.SRGBColorSpace;
+const vrPanel = new THREE.Mesh(new THREE.PlaneGeometry(1.0, 0.5),
+  new THREE.MeshBasicMaterial({ map: vrTex, transparent: true, depthTest: false }));
+vrPanel.renderOrder = 10;
+vrPanel.position.set(0, 0.45, -0.2);
+vrPanel.rotation.x = -0.25;
+board.add(vrPanel);
+function vrShow(lines) {
+  const c = vctx;
+  c.clearRect(0, 0, 1024, 512);
+  if (!lines.length) { vrPanel.visible = false; vrTex.needsUpdate = true; return; }
+  vrPanel.visible = true;
+  c.fillStyle = 'rgba(3,16,26,0.85)'; c.fillRect(0, 0, 1024, 512);
+  c.strokeStyle = '#4fd0ff'; c.lineWidth = 6; c.strokeRect(4, 4, 1016, 504);
+  c.textAlign = 'center'; c.fillStyle = '#dff4ff';
+  let y = 90;
+  lines.forEach((l, i) => {
+    c.font = (i === 0 ? 'bold 60px' : 'bold 32px') + ' monospace';
+    c.fillText(l, 512, y);
+    y += i === 0 ? 86 : 52;
+  });
+  vrTex.needsUpdate = true;
+}
+const stripHtml = h => String(h).replace(/<br\s*\/?>/gi, '\n').replace(/&middot;/g, '-').replace(/<[^>]+>/g, '');
 function renderText(t, sub) {
+  vrShow([t].concat(stripHtml(sub).split('\n').filter(x => x.trim())));
   panel.innerHTML = '<div style="font-size:40px;font-weight:bold;letter-spacing:0.15em">' + t + '</div>' +
     '<div style="font-size:16px;margin-top:14px;line-height:1.7;opacity:0.9">' + sub + '</div>';
 }
@@ -743,6 +784,25 @@ function drawHUD() {
   hudTex.needsUpdate = true;
 }
 
+// ---------- BOARD HEIGHT: fit the board to where your head actually is ----------
+let boardPlacedFrames = 0;
+const headPos = new THREE.Vector3();
+renderer.xr.addEventListener('sessionstart', () => { boardPlacedFrames = 0; });
+renderer.xr.addEventListener('sessionend', () => { board.position.set(0, BOARD_Y, -0.95); });
+function placeBoardForHead() {
+  if (!renderer.xr.isPresenting) return;
+  for (const c of controllers) {           // Y or B re-centres the board
+    const gp = c.userData.gp;
+    if (gp && gp.buttons && ((gp.buttons[4] && gp.buttons[4].pressed) || (gp.buttons[5] && gp.buttons[5].pressed))) boardPlacedFrames = 0;
+  }
+  if (boardPlacedFrames > 30) return;
+  renderer.xr.getCamera().getWorldPosition(headPos);
+  if (headPos.y < 0.3) return;             // headset pose not ready yet
+  boardPlacedFrames++;
+  // 55 cm below your eyes, 85 cm in front: a table you look down on, seated or standing
+  board.position.set(headPos.x, Math.max(0.35, headPos.y - 0.55), headPos.z - 0.85);
+}
+
 // ---------- FRAME ----------
 function gameFrame() {
   const frameStart = performance.now();
@@ -759,6 +819,7 @@ function gameFrame() {
 
   const now = performance.now();
 
+  placeBoardForHead();
   if (S.state === 'play') {
     S.time += dt;
     S.eraTimer += dt;
