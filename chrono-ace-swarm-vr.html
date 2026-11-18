@@ -78,6 +78,73 @@ const skyTex = (() => {
   return t;
 })();
 scene.background = skyTex;
+
+// ---------- CLOUDS: real cloud objects over the field, so they drift past you ----------
+// The board only moves a pixel at a time, so a cloud parented to something that moves
+// with the board would appear to sit still. These live in the world instead, and shift
+// by the exact amount the board has been carried, which is what makes them stream past.
+const cloudLayer = new THREE.Group();
+scene.add(cloudLayer);
+// one soft white blob, reused for every lobe of every cloud
+const cloudBlobTex = (() => {
+  const c = document.createElement('canvas'); c.width = c.height = 128;
+  const x = c.getContext('2d');
+  const g = x.createRadialGradient(64, 64, 0, 64, 64, 64);
+  g.addColorStop(0, 'rgba(255,255,255,0.95)');
+  g.addColorStop(0.5, 'rgba(255,255,255,0.6)');
+  g.addColorStop(1, 'rgba(255,255,255,0)');
+  x.fillStyle = g; x.fillRect(0, 0, 128, 128);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+})();
+const clouds = [];
+const CLOUD_SPAN_X = 7.0;      // how far the sky of clouds reaches, either side
+const CLOUD_SPAN_Z = 5.0;
+const cloudsPerSky = 14;
+function makeCloud() {
+  const g = new THREE.Group();
+  const lobes = 4 + Math.floor(Math.random() * 4);
+  const base = 0.28 + Math.random() * 0.5;
+  for (let k = 0; k < lobes; k++) {
+    const m = new THREE.Sprite(new THREE.SpriteMaterial({ map: cloudBlobTex,
+      transparent: true, depthWrite: false, opacity: 0.35 + Math.random() * 0.4 }));
+    const r = base * (0.6 + Math.random() * 0.7);
+    m.scale.set(r, r * 0.6, 1);
+    m.position.set((k - (lobes - 1) / 2) * base * 0.85 + (Math.random() - 0.5) * base * 0.4,
+                   (Math.random() - 0.5) * base * 0.25, 0);
+    g.add(m);
+  }
+  // thin islands of cloud high up, fatter banks lower down
+  const layer = Math.random();
+  g.userData.y = 0.3 + layer * 1.6;
+  g.userData.speed = 0.004 + Math.random() * 0.012;   // a slow breeze, all the same way
+  return g;
+}
+function seedClouds() {
+  for (const c of clouds) cloudLayer.remove(c);
+  clouds.length = 0;
+  for (let i = 0; i < cloudsPerSky; i++) {
+    const g = makeCloud();
+    g.position.set((Math.random() * 2 - 1) * CLOUD_SPAN_X, g.userData.y,
+                   (Math.random() * 2 - 1) * CLOUD_SPAN_Z);
+    cloudLayer.add(g);
+    clouds.push(g);
+  }
+}
+// clouds stand still in the sky; the ground streaming past underneath is the motion
+function driftClouds(dt, camX, camZ) {
+  for (const c of clouds) {
+    c.position.x -= camX;
+    c.position.z -= camZ;
+    c.position.x += c.userData.speed * dt;            // a slight breeze on top
+    // wrap it round to the far side so the sky never empties
+    if (c.position.x > CLOUD_SPAN_X) c.position.x -= CLOUD_SPAN_X * 2;
+    if (c.position.x < -CLOUD_SPAN_X) c.position.x += CLOUD_SPAN_X * 2;
+    if (c.position.z > CLOUD_SPAN_Z) c.position.z -= CLOUD_SPAN_Z * 2;
+    if (c.position.z < -CLOUD_SPAN_Z) c.position.z += CLOUD_SPAN_Z * 2;
+  }
+}
+seedClouds();
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.setSize(innerWidth, innerHeight);
@@ -1057,6 +1124,7 @@ function startRun() {
   for (const p of pickups) board.remove(p.mesh);
   mines.length = 0; pickups.length = 0; crateRefills.length = 0;
   for (let i = 0; i < CRATES_TARGET; i++) spawnPickup();   // two crates, and no more
+  seedClouds();
   S.fireRate = 2.6; S.damage = 1; S.bulletSpeed = 4.2; S.wingmen = 0; S.pierce = 0; S.magnet = 0.35;
   S.sideGuns = 0; S.rearGun = 0; S.mines = 0; S.shield = 0; S.speedBonus = 0;
   S.ringShots = 0; S.ringTimer = 0; S.homing = 0; S.weaponName = 'SINGLE GUN';
@@ -1240,11 +1308,15 @@ renderer.xr.addEventListener('sessionstart', () => { boardPlacedFrames = 0; });
 renderer.xr.addEventListener('sessionend', () => { board.position.set(0, BOARD_Y, -0.95); });
 // every frame after placement, the board's place in the world is its home MINUS the
 // distance it has been carried, which is what puts the plane back in front of you
-function holdBoardUnderPlayer() {
+let lastCamX = 0, lastCamZ = 0;
+function holdBoardUnderPlayer(clampDt) {
   if (!renderer.xr.isPresenting) return;
   if (boardPlacedFrames <= 30 && boardPlacedFrames > 0) boardHome.copy(board.position);
   board.position.x = boardHome.x - cam.x;
   board.position.z = boardHome.z - cam.z;
+  // the clouds shift by how far the board was carried this frame
+  driftClouds(clampDt, cam.x - lastCamX, cam.z - lastCamZ);
+  lastCamX = cam.x; lastCamZ = cam.z;
 }
 // Vampire-Survivors style: the plane flies freely inside a frame a good deal
 // larger than the board, and the board only slides when the plane reaches the
@@ -1309,7 +1381,7 @@ function gameFrame() {
 
   placeBoardForHead();
   applyZoom();
-  holdBoardUnderPlayer();
+  holdBoardUnderPlayer(dt);
   // Y button (left controller, upper face button) quits to the title screen
   for (const c of controllers) {
     const gp = c.userData.gp;
