@@ -564,18 +564,40 @@ const enemyMats = [
   new THREE.MeshStandardMaterial({ color: 0xd35400, roughness: 0.6 }),
   new THREE.MeshStandardMaterial({ color: 0x8e44ad, roughness: 0.6 }),
 ];
+// A KIND is stored on each enemy, separate from the era, so a wave of one era can throw
+// three different silhouettes at you at once. `speed` is the enemy's actual pace, `hp`
+// its armour, `gem` what it drops, and `score` what it pays.
+const ENEMY_KINDS = [
+  { name: 'SCOUT',   speed: 0.20, hp: 1, w: 1.0, gem: 1, score: 10, colour: 0x9ad2ff, scale: 0.015 },
+  { name: 'FIGHTER', speed: 0.13, hp: 2, w: 1.6, gem: 2, score: 20, colour: 0xd0453a, scale: 0.018 },
+  { name: 'BOMBER',  speed: 0.07, hp: 5, w: 1.1, gem: 4, score: 50, colour: 0x7a5a2a, scale: 0.026 },
+  { name: 'VIPER',   speed: 0.27, hp: 1, w: 0.9, gem: 1, score: 25, colour: 0x4ad07a, scale: 0.014 },
+  { name: 'SAUCER',  speed: 0.17, hp: 3, w: 0.6, gem: 3, score: 40, colour: 0xd06ad0, scale: 0.020 },
+];
 const enemyTemplates = {};
-function makeSwarmEnemy() {
-  const e = era();
-  // every era gets its own hull, so levelling changes what you are shooting at
-  const shape = e.shape === 'futuristic' ? 'saucer' : e.shape;
-  const key = shape + ':' + e.color;
-  if (!enemyTemplates[key]) enemyTemplates[key] = makeAircraft(shape, e.color, 0.018);
+// each kind flies the era's hull, but in its own colour and at its own size, so the
+// tougher ones read as tougher the moment you see them
+function enemyHull(kind) {
+  const key = kind.name + ':' + era().shape;
+  if (!enemyTemplates[key]) {
+    const shape = (era().shape === 'futuristic' || kind.name === 'SAUCER')
+      ? 'saucer' : era().shape;
+    enemyTemplates[key] = makeAircraft(shape, kind.colour, kind.scale);
+  }
   const g = new THREE.Group();
   const m = enemyTemplates[key].clone();
   m.rotation.y = Math.PI;          // nose toward the direction of travel
   g.add(m);
   return g;
+}
+function kind_bar_y(e) { return (e.kind ? e.kind.scale : 0.018) * 2.2; }
+function pickEnemyKind() {
+  // weighted: scouts and fighters are common, bombers are an event
+  let total = 0;
+  for (const k of ENEMY_KINDS) total += k.w;
+  let r = Math.random() * total;
+  for (const k of ENEMY_KINDS) { r -= k.w; if (r <= 0) return k; }
+  return ENEMY_KINDS[0];
 }
 const enemies = [];
 const gems = [];
@@ -591,12 +613,14 @@ function spawnEnemy() {
   else if (edge === 1) { x = tx; z = ARENA + 0.12; }
   else if (edge === 2) { x = -(ARENA_X + 0.12); z = tz; }
   else { x = ARENA_X + 0.12; z = tz; }
-  const mat = enemyMats[S.eraIndex % enemyMats.length];
-  const mesh = makeSwarmEnemy();
+  const kind = pickEnemyKind();
+  const mesh = enemyHull(kind);
   mesh.position.set(x, 0.045, z);
   board.add(mesh);
-  const hp = 1 + Math.floor(S.level / 4);
-  enemies.push({ mesh, hp, maxHp: hp, speed: 0.10 + S.level * 0.006, hitFlash: 0 });
+  // armour scales with the level on top of the kind's own toughness
+  const hp = kind.hp + Math.floor(S.level / 5);
+  enemies.push({ mesh, hp, maxHp: hp, kind,
+    speed: kind.speed + S.level * 0.004, hitFlash: 0, bounty: kind.score, gem: kind.gem });
 }
 
 // ---------- FIRING ----------
@@ -703,7 +727,7 @@ const crateLidTex = (() => {
   return t;
 })();
 const crateSideMat = new THREE.MeshStandardMaterial({ color: 0x6b5232, roughness: 0.95, metalness: 0.05 });
-const CRATES_TARGET = 7;        // the field carries this many, and refills to it
+const CRATES_TARGET = 2;        // the field carries this many, and refills to it
 function spawnCrateAt(x, z) {
   const g = new THREE.Group();
   g.add(new THREE.Mesh(crateGeo, crateSideMat));
@@ -981,7 +1005,7 @@ function startRun() {
   for (const m of mines) board.remove(m.mesh);
   for (const p of pickups) board.remove(p.mesh);
   mines.length = 0; pickups.length = 0; crateRefills.length = 0;
-  for (let i = 0; i < CRATES_TARGET; i++) spawnPickup();   // stock the field
+  for (let i = 0; i < CRATES_TARGET; i++) spawnPickup();   // two crates, and no more
   S.fireRate = 2.6; S.damage = 1; S.bulletSpeed = 4.2; S.wingmen = 0; S.pierce = 0; S.magnet = 0.35;
   S.sideGuns = 0; S.rearGun = 0; S.mines = 0; S.shield = 0; S.speedBonus = 0;
   S.ringShots = 0; S.ringTimer = 0; S.homing = 0; S.weaponName = 'SINGLE GUN';
@@ -1042,14 +1066,31 @@ function vrShow(lines) {
   c.clearRect(0, 0, 1024, 512);
   if (!lines.length) { vrPanel.visible = false; vrTex.needsUpdate = true; return; }
   vrPanel.visible = true;
-  c.fillStyle = 'rgba(3,16,26,0.85)'; c.fillRect(0, 0, 1024, 512);
+  // measure first, then size the letters and the spacing to fit the panel's width,
+  // so a long line is shrunk rather than run off the edge
+  const TITLE_MAX = 48, BODY_MAX = 30;
+  const widest = font => {
+    let w = 0;
+    c.font = font;
+    for (const l of lines) w = Math.max(w, c.measureText(l).width);
+    return w;
+  };
+  const titleFit = Math.min(TITLE_MAX, 900 / Math.max(1, widest('bold ' + TITLE_MAX + 'px monospace') / TITLE_MAX));
+  const titleSize = Math.max(26, titleFit);
+  const titleW = (() => { c.font = 'bold ' + titleSize + 'px monospace';
+    return c.measureText(lines[0]).width; })();
+  const bodyFit = Math.min(BODY_MAX, 940 / Math.max(1, widest('bold ' + BODY_MAX + 'px monospace') / BODY_MAX));
+  const bodySize = Math.max(15, bodyFit);
+  const titleH = titleSize * 1.4, bodyH = bodySize * 1.66;
+  const totalH = titleH + bodyH * (lines.length - 1);
+  let y = (512 - totalH) / 2 + titleSize * 0.92;
+  c.fillStyle = 'rgba(3,16,26,0.88)'; c.fillRect(0, 0, 1024, 512);
   c.strokeStyle = '#4fd0ff'; c.lineWidth = 6; c.strokeRect(4, 4, 1016, 504);
   c.textAlign = 'center'; c.fillStyle = '#dff4ff';
-  let y = 90;
   lines.forEach((l, i) => {
-    c.font = (i === 0 ? 'bold 60px' : 'bold 32px') + ' monospace';
+    c.font = (i === 0 ? 'bold ' + titleSize : 'bold ' + bodySize) + 'px monospace';
     c.fillText(l, 512, y);
-    y += i === 0 ? 86 : 52;
+    y += i === 0 ? titleH : bodyH;
   });
   vrTex.needsUpdate = true;
 }
@@ -1118,7 +1159,7 @@ renderer.xr.addEventListener('sessionend', () => { board.position.set(0, BOARD_Y
 // Vampire-Survivors style: the plane flies freely inside a frame a good deal
 // larger than the board, and the board only slides when the plane reaches the
 // frame's edge. In the middle, the plane moves and the ground stays put.
-const FRAME_X = 1.15, FRAME_Z = 0.62;      // how far the plane may roam from centre
+const FRAME_X = 0.62, FRAME_Z = 0.34;      // how far the plane may roam from centre
 const cam = { x: 0, z: 0 };
 function applyZoom() {
   const z = board.userData.zoom || 1;
@@ -1191,6 +1232,7 @@ function gameFrame() {
     player.position.x += inp.x * speed * dt;
     player.position.z += inp.z * speed * dt;
     // the plane roams a frame larger than the board; the board follows at the edges
+    // the plane may reach the frame's edge and no further; the board slides in behind
     player.position.x = Math.max(-FRAME_X, Math.min(FRAME_X, player.position.x));
     player.position.z = Math.max(-FRAME_Z, Math.min(FRAME_Z, player.position.z));
     // the plane faces the way it moves; when still, it keeps its last heading
@@ -1220,7 +1262,7 @@ function gameFrame() {
       if (S.ringTimer <= 0) { S.ringTimer = S.ringEvery; ringVolley(); }
     }
     // --- bonuses appear across the field ---
-    if (Math.random() < dt * 0.45) spawnPickup();
+    if (pickups.length < CRATES_TARGET && Math.random() < dt * 0.06) spawnPickup();
 
     // --- swarms ramp with level and era ---
     const spawnRate = 3 + S.level * 1.1 + S.eraIndex * 1.5;
@@ -1278,10 +1320,10 @@ function gameFrame() {
       if (b.mesh.position.distanceTo(e.mesh.position) < 0.045) {
         e.hp -= S.damage; e.hitFlash = 0.12;
         if (e.hp <= 0) {
-          burst(e.mesh.position.clone(), 0.05);
-          dropGem(e.mesh.position.clone());
+          burst(e.mesh.position.clone(), e.kind && e.kind.name === 'BOMBER' ? 0.09 : 0.05);
+          for (let g = 0; g < (e.gem || 1); g++) dropGem(e.mesh.position.clone());
           board.remove(e.mesh); enemies.splice(k, 1);
-          S.kills++; S.score += 10;
+          S.kills++; S.score += (e.bounty || 10);
         } else {
           b.hits++;
           if (b.hits > S.pierce) { board.remove(b.mesh); bullets.splice(i, 1); }
@@ -1303,6 +1345,19 @@ function gameFrame() {
       e.hitFlash -= dt;
       e.mesh.scale.setScalar(1 + e.hitFlash * 2.5);
     } else e.mesh.scale.setScalar(1);
+    // a chipped bar over anything with real armour, so you can see what you have done
+    if (e.maxHp > 2) {
+      if (!e.bar) {
+        e.bar = new THREE.Sprite(new THREE.SpriteMaterial({ color: 0xff5a4a, transparent: true,
+          depthWrite: false, toneMapped: false }));
+        e.bar.scale.set(0.03, 0.005, 1);
+        e.mesh.add(e.bar);
+      }
+      const frac = e.hp / e.maxHp;
+      e.bar.visible = frac < 0.999;
+      e.bar.scale.x = Math.max(0.002, 0.03 * frac);
+      e.bar.position.set(0, kind_bar_y(e), 0);
+    }
     // reach the player
     if (d < 0.055) {
       if (!player.userData.grace || now > player.userData.grace) damagePlayer();
@@ -1322,7 +1377,10 @@ function gameFrame() {
         burst(m.mesh.position.clone(), 0.05);
         board.remove(m.mesh); mines.splice(i, 1);
         board.remove(e.mesh);
-        if (e.hp - S.damage <= 0) { dropGem(e.mesh.position.clone()); S.kills++; S.score += 10; }
+        if (e.hp - S.damage <= 0) {
+          for (let g = 0; g < (e.gem || 1); g++) dropGem(e.mesh.position.clone());
+          S.kills++; S.score += (e.bounty || 10);
+        }
         enemies.splice(k, 1);
         break;
       }
