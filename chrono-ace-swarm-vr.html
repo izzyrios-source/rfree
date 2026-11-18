@@ -1325,8 +1325,8 @@ function holdBoardUnderPlayer(clampDt) {
 // The boundary stands still in front of you and the field runs on beneath it. The plane
 // is stopped at the boundary; the field is pushed past it, so the grass keeps streaming
 // while the frame stays put.
-const BOUND_X = 0.86, BOUND_Z = 0.50;      // half-size of the static boundary
-const WINDOW_X = BOUND_X, WINDOW_Z = BOUND_Z;
+const BOUND_X = 0.86, BOUND_Z = 0.50;      // the plane is kept inside the visible tray
+const WINDOW_X = 0.0, WINDOW_Z = 0.0;      // VS-style: the field is centred on the plane
 const cam = { x: 0, z: 0 };                // how far the board has been carried
 const boardHome = new THREE.Vector3();     // where the board sits under your head
 function applyZoom() {
@@ -1401,9 +1401,10 @@ function gameFrame() {
     const speed = 0.62 * (1 + (S.speedBonus || 0));                       // metres per second on the board
     player.position.x += inp.x * speed * dt;
     player.position.z += inp.z * speed * dt;
-    // the plane travels until it meets the boundary, which does not move
-    player.position.x = Math.max(-BOUND_X, Math.min(BOUND_X, player.position.x));
-    player.position.z = Math.max(-BOUND_Z, Math.min(BOUND_Z, player.position.z));
+    // The plane is kept just inside the tray's visible edge — not to block it, but so it
+    // cannot slide off the field. The field's carry below is what actually moves the world.
+    player.position.x = Math.max(-BOUND_X + 0.05, Math.min(BOUND_X - 0.05, player.position.x));
+    player.position.z = Math.max(-BOUND_Z + 0.05, Math.min(BOUND_Z - 0.05, player.position.z));
     // the plane faces the way it moves; when still, it keeps its last heading
     if (Math.abs(inp.x) + Math.abs(inp.z) > 0.05) {
       const want = Math.atan2(inp.x, inp.z) + Math.PI;
