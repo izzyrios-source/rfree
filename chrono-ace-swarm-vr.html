@@ -1341,15 +1341,9 @@ const DIAG = { dx: 0, dz: 0, runs: 0, shown: false };
 function applyZoom() {
   const z = board.userData.zoom || 1;
   board.scale.setScalar(z);
-  // Move the field by exactly what the plane moved this frame, and the plane by nothing.
-  // One distance, applied to the field alone: the plane holds station in front of you and
-  // the world runs past it, which is the Vampire Survivors arrangement.
-  const dx = player.position.x, dz = player.position.z;
-  DIAG.dx = dx; DIAG.dz = dz; DIAG.runs++;
-  cam.x += dx; cam.z += dz;
-  field.position.x -= dx;
-  field.position.z -= dz;
-  // the plane's own x/z go back to the centre: the field's new position IS its new place
+  // The plane's own x/z are measured against the field's centre, and the frame loop has
+  // already moved the field by the same step the plane took — so put the plane back on the
+  // middle. The plane keeps its place in front of you; the world is what travels.
   player.position.x = 0;
   player.position.z = 0;
 }
@@ -1417,11 +1411,13 @@ function gameFrame() {
 
     // --- move the player, clamped to the board ---
     const inp = stickInput();
-    const speed = 0.62 * (1 + (S.speedBonus || 0));                       // metres per second on the board
-    player.position.x += inp.x * speed * dt;
-    player.position.z += inp.z * speed * dt;
-    // No clip and no wall. applyZoom pins the plane back onto the field's centre each
-    // frame, so the plane holds station while the field runs past underneath it.
+    const speed = 0.62 * (1 + (S.speedBonus || 0));        // metres per second, world units
+    // One step, on the world's axes, applied to the field. The plane keeps its place.
+    const stepX = inp.x * speed * dt, stepZ = inp.z * speed * dt;
+    cam.x += stepX; cam.z += stepZ;
+    field.position.x -= stepX;
+    field.position.z -= stepZ;
+    DIAG.dx = stepX; DIAG.dz = stepZ; DIAG.runs++;
     // the plane faces the way it moves; when still, it keeps its last heading
     if (Math.abs(inp.x) + Math.abs(inp.z) > 0.05) {
       const want = Math.atan2(inp.x, inp.z) + Math.PI;
