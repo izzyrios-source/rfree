@@ -1315,9 +1315,9 @@ function drawHUD() {
 }
 
 // ---------- BOARD HEIGHT: fit the board to where your head actually is ----------
-let boardPlacedFrames = 0;
+let boardPlaced = false;                  // the tray is placed once and then left alone
 const headPos = new THREE.Vector3();
-renderer.xr.addEventListener('sessionstart', () => { boardPlacedFrames = 0; });
+renderer.xr.addEventListener('sessionstart', () => { boardPlaced = false; });
 renderer.xr.addEventListener('sessionend', () => { board.position.set(0, BOARD_Y, -0.95); });
 // every frame after placement, the board's place in the world is its home MINUS the
 // distance it has been carried, which is what puts the plane back in front of you
@@ -1359,17 +1359,13 @@ function framePush() {
 }
 function placeBoardForHead() {
   if (!renderer.xr.isPresenting) return;
-  for (const c of controllers) {           // Y or B re-centres the board
-    const gp = c.userData.gp;
-    if (gp && gp.buttons && gp.buttons[4] && gp.buttons[4].pressed) boardPlacedFrames = 0;
-  }
-  if (boardPlacedFrames > 30) return;
+  if (boardPlaced) return;                 // placed: never touched again this session
   renderer.xr.getCamera().getWorldPosition(headPos);
   if (headPos.y < 0.3) return;             // headset pose not ready yet
-  boardPlacedFrames++;
   // 55 cm below your eyes, 85 cm in front: a table you look down on, seated or standing
   board.position.set(headPos.x, Math.max(0.35, headPos.y - 0.55), headPos.z - 0.85);
   boardHome.copy(board.position);
+  boardPlaced = true;
 }
 
 // ---------- FRAME ----------
@@ -1398,6 +1394,14 @@ function gameFrame() {
         if (btn && b === 1 && btn.pressed) DIAG.shown = true;
       }
     }
+  }
+  // X re-centres the tray: the one and only thing that moves it once it has been placed
+  for (const c of controllers) {
+    const gp = c.userData.gp;
+    if (gp && gp.buttons && gp.buttons[5] && gp.buttons[5].pressed && c.userData.hand === 'left') {
+      if (!c.userData.xWas) boardPlaced = false;
+      c.userData.xWas = true;
+    } else c.userData.xWas = false;
   }
   placeBoardForHead();
   applyZoom();
