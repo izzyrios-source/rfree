@@ -189,6 +189,10 @@ board.position.set(0, BOARD_Y, -0.95);
 rig.add(board);
 const field = new THREE.Group();           // everything that lives on the field and scrolls
 board.add(field);
+// The window: one copy of the battlefield, made once when it is empty of everything but
+// the ground, and redrawn each frame wherever the field has been carried to.
+const fieldWindow = new THREE.Group();
+fieldWindow.matrixAutoUpdate = false;
 
 const boardMat = new THREE.MeshStandardMaterial({ color: 0x1d3348, roughness: 0.9, metalness: 0.1 });
 const boardMesh = new THREE.Mesh(new THREE.BoxGeometry(ARENA_X * 2, 0.05, ARENA * 2), boardMat);
@@ -276,6 +280,16 @@ const grass = new THREE.Mesh(new THREE.PlaneGeometry(ARENA_X * 2, ARENA * 2),
 grass.rotation.x = -Math.PI / 2;
 grass.position.y = 0.0255;
 field.add(grass);
+
+// ---- THE WINDOW ----
+// Take the copy NOW, while the field holds nothing but the tray floor, its lip and the
+// grass. Everything that will live on the field — the plane, the enemies, the bullets, the
+// gems, the mines, the crates, the effects — is built later, so none of it can end up in
+// the copy. This ordering is the whole trick: the copy is the ground alone.
+field.updateMatrixWorld(true);
+for (const part of field.children) fieldWindow.add(part.clone());
+field.visible = false;                     // the live field is hidden; the window that shows
+                                           // it is hung on the tray at the end of boot
 
 const ERAS = [
   { year: 1914, top: 0x3d7fd1, horizon: 0xdcefff, bottom: 0x3c5a34, sun: 0xfff3d6, sunDir: [0.4, 0.5, -0.8], cloud: 0xffffff, shade: 0xc9d3de, color: 0x9b7a48, speed: 20, shape: 'biplane' },
@@ -1127,6 +1141,8 @@ function startRun() {
   mines.length = 0; pickups.length = 0; crateRefills.length = 0;
   for (let i = 0; i < CRATES_TARGET; i++) spawnPickup();   // two crates, and no more
   seedClouds();
+  player.position.set(0, 0.04, 0.1);                       // the plane starts at field centre
+  cam.x = 0; cam.z = 0;
   S.fireRate = 2.6; S.damage = 1; S.bulletSpeed = 4.2; S.wingmen = 0; S.pierce = 0; S.magnet = 0.35;
   S.sideGuns = 0; S.rearGun = 0; S.mines = 0; S.shield = 0; S.speedBonus = 0;
   S.ringShots = 0; S.ringTimer = 0; S.homing = 0; S.weaponName = 'SINGLE GUN';
@@ -1341,12 +1357,13 @@ const DIAG = { px: 0, pz: 0, runs: 0, shown: false };
 function applyZoom() {
   const z = board.userData.zoom || 1;
   board.scale.setScalar(z);
-  // The field goes exactly where the plane went. Both end up in the same place, so the
-  // plane appears to hold station in front of you and the world travels instead. The tray
-  // and the readout sit on the static stage and are never touched.
+  // Carry the battlefield by the plane's travel, then show it through the window.
   field.position.x = -player.position.x;
   field.position.z = -player.position.z;
   cam.x = player.position.x; cam.z = player.position.z;
+  // the window is held on the tray and shows the field wherever the field has got to,
+  // so the ground slides through the frame while the frame itself never moves
+  fieldWindow.matrix.copy(field.matrixWorld);
 }
 // the bank angle reads the field's motion, so the plane leans into a push
 function framePush() {
@@ -1630,6 +1647,9 @@ renderer.setAnimationLoop(() => {
 });
 
 // ---------- BOOT ----------
+// The tray moved into position during placement; the window sits the same place the ground
+// would if the battlefield had never moved, which is the tray itself.
+board.add(fieldWindow);
 quit();
 
 
