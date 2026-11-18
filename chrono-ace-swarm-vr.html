@@ -78,6 +78,73 @@ const skyTex = (() => {
   return t;
 })();
 scene.background = skyTex;
+
+// ---------- CLOUDS: real cloud objects over the field, so they drift past you ----------
+// The board only moves a pixel at a time, so a cloud parented to something that moves
+// with the board would appear to sit still. These live in the world instead, and shift
+// by the exact amount the board has been carried, which is what makes them stream past.
+const cloudLayer = new THREE.Group();
+scene.add(cloudLayer);
+// one soft white blob, reused for every lobe of every cloud
+const cloudBlobTex = (() => {
+  const c = document.createElement('canvas'); c.width = c.height = 128;
+  const x = c.getContext('2d');
+  const g = x.createRadialGradient(64, 64, 0, 64, 64, 64);
+  g.addColorStop(0, 'rgba(255,255,255,0.95)');
+  g.addColorStop(0.5, 'rgba(255,255,255,0.6)');
+  g.addColorStop(1, 'rgba(255,255,255,0)');
+  x.fillStyle = g; x.fillRect(0, 0, 128, 128);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+})();
+const clouds = [];
+const CLOUD_SPAN_X = 7.0;      // how far the sky of clouds reaches, either side
+const CLOUD_SPAN_Z = 5.0;
+const cloudsPerSky = 14;
+function makeCloud() {
+  const g = new THREE.Group();
+  const lobes = 4 + Math.floor(Math.random() * 4);
+  const base = 0.28 + Math.random() * 0.5;
+  for (let k = 0; k < lobes; k++) {
+    const m = new THREE.Sprite(new THREE.SpriteMaterial({ map: cloudBlobTex,
+      transparent: true, depthWrite: false, opacity: 0.35 + Math.random() * 0.4 }));
+    const r = base * (0.6 + Math.random() * 0.7);
+    m.scale.set(r, r * 0.6, 1);
+    m.position.set((k - (lobes - 1) / 2) * base * 0.85 + (Math.random() - 0.5) * base * 0.4,
+                   (Math.random() - 0.5) * base * 0.25, 0);
+    g.add(m);
+  }
+  // thin islands of cloud high up, fatter banks lower down
+  const layer = Math.random();
+  g.userData.y = 0.3 + layer * 1.6;
+  g.userData.speed = 0.004 + Math.random() * 0.012;   // a slow breeze, all the same way
+  return g;
+}
+function seedClouds() {
+  for (const c of clouds) cloudLayer.remove(c);
+  clouds.length = 0;
+  for (let i = 0; i < cloudsPerSky; i++) {
+    const g = makeCloud();
+    g.position.set((Math.random() * 2 - 1) * CLOUD_SPAN_X, g.userData.y,
+                   (Math.random() * 2 - 1) * CLOUD_SPAN_Z);
+    cloudLayer.add(g);
+    clouds.push(g);
+  }
+}
+// clouds stand still in the sky; the ground streaming past underneath is the motion
+function driftClouds(dt, camX, camZ) {
+  for (const c of clouds) {
+    c.position.x -= camX;
+    c.position.z -= camZ;
+    c.position.x += c.userData.speed * dt;            // a slight breeze on top
+    // wrap it round to the far side so the sky never empties
+    if (c.position.x > CLOUD_SPAN_X) c.position.x -= CLOUD_SPAN_X * 2;
+    if (c.position.x < -CLOUD_SPAN_X) c.position.x += CLOUD_SPAN_X * 2;
+    if (c.position.z > CLOUD_SPAN_Z) c.position.z -= CLOUD_SPAN_Z * 2;
+    if (c.position.z < -CLOUD_SPAN_Z) c.position.z += CLOUD_SPAN_Z * 2;
+  }
+}
+seedClouds();
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.setSize(innerWidth, innerHeight);
@@ -117,20 +184,22 @@ addEventListener('resize', () => {
 const ARENA = 1.0;                 // half-depth in world metres
 const ARENA_X = 1.6;               // half-width: the field is wider than it is deep
 const BOARD_Y = 1.02;              // height of the board above the floor
-const board = new THREE.Group();
+const board = new THREE.Group();           // the static stage: never moves, so it cannot vanish
 board.position.set(0, BOARD_Y, -0.95);
 rig.add(board);
+const field = new THREE.Group();           // everything that lives on the field and scrolls
+board.add(field);
 
 const boardMat = new THREE.MeshStandardMaterial({ color: 0x1d3348, roughness: 0.9, metalness: 0.1 });
 const boardMesh = new THREE.Mesh(new THREE.BoxGeometry(ARENA_X * 2, 0.05, ARENA * 2), boardMat);
-board.add(boardMesh);
+field.add(boardMesh);
 // a raised lip around the edge, so the arena reads as a physical tray
 const lipMat = new THREE.MeshStandardMaterial({ color: 0x2c4a63, roughness: 0.6, metalness: 0.4 });
 for (const [w, d, x, z] of [[ARENA_X*2+0.08, 0.05, 0, ARENA], [ARENA_X*2+0.08, 0.05, 0, -ARENA],
                              [0.05, ARENA*2+0.08, ARENA_X, 0], [0.05, ARENA*2+0.08, -ARENA_X, 0]]) {
   const e = new THREE.Mesh(new THREE.BoxGeometry(w, 0.07, d), lipMat);
   e.position.set(x, 0.03, z);
-  board.add(e);
+  field.add(e);
 }
 // a grass field painted on a canvas: mottled greens plus thousands of blade strokes
 const grassTex = (() => {
@@ -206,7 +275,7 @@ const grass = new THREE.Mesh(new THREE.PlaneGeometry(ARENA_X * 2, ARENA * 2),
   new THREE.MeshStandardMaterial({ map: grassTex, roughness: 0.95, metalness: 0 }));
 grass.rotation.x = -Math.PI / 2;
 grass.position.y = 0.0255;
-board.add(grass);
+field.add(grass);
 
 const ERAS = [
   { year: 1914, top: 0x3d7fd1, horizon: 0xdcefff, bottom: 0x3c5a34, sun: 0xfff3d6, sunDir: [0.4, 0.5, -0.8], cloud: 0xffffff, shade: 0xc9d3de, color: 0x9b7a48, speed: 20, shape: 'biplane' },
@@ -562,7 +631,7 @@ const S = {
 };
 
 const player = new THREE.Group();
-board.add(player);
+field.add(player);
 let playerMesh = makeAircraft('futuristic', 0x8fd0ff, 0.024);
 player.add(playerMesh);
 // a soft glow under the player, so you never lose it in a swarm
@@ -663,7 +732,7 @@ function spawnEnemy() {
   const kind = pickEnemyKind();
   const mesh = enemyHull(kind);
   mesh.position.set(x, 0.045, z);
-  board.add(mesh);
+  field.add(mesh);
   // armour scales with the level on top of the kind's own toughness
   const hp = kind.hp + Math.floor(S.level / 5);
   enemies.push({ mesh, hp, maxHp: hp, kind,
@@ -681,7 +750,7 @@ function bulletAt(a, fromPlayer, spreadDeg) {
   const dir = new THREE.Vector3(-Math.sin(a), 0, -Math.cos(a));
   const b = new THREE.Mesh(bulletGeo, bulletMat);
   b.position.copy(fromPlayer ? player.position : player.position).setY(0.05).addScaledVector(dir, 0.04);
-  board.add(b);
+  field.add(b);
   bullets.push({ mesh: b, dir, life: 1.4, hits: 0, homing: S.homing });
 }
 function fire() {
@@ -707,7 +776,7 @@ let fireTimer = 0;
 function dropMine() {
   const m = new THREE.Mesh(mineGeo, mineMat);
   m.position.copy(player.position).setY(0.045);
-  board.add(m);
+  field.add(m);
   mines.push({ mesh: m, born: performance.now(), life: 6000 });
 }
 // the era's ring of fire: a full circle of shots every few seconds
@@ -723,7 +792,7 @@ const gemMat = new THREE.MeshBasicMaterial({ color: 0x7cffb0, toneMapped: false 
 function dropGem(pos) {
   const m = new THREE.Mesh(gemGeo, gemMat);
   m.position.copy(pos).setY(0.04);
-  board.add(m);
+  field.add(m);
   gems.push({ mesh: m, born: performance.now() });
 }
 
@@ -788,7 +857,7 @@ function spawnCrateAt(x, z) {
   lid.position.y = 0.020;
   g.add(lid);
   g.position.set(x, 0.019, z);
-  board.add(g);
+  field.add(g);
   // contents are rolled at random when the crate is made, never shown until it breaks
   const def = PICKUPS[Math.floor(Math.random() * PICKUPS.length)];
   pickups.push({ mesh: g, id: def.id, hp: 1 });
@@ -810,7 +879,7 @@ function spawnPickup() {
 function breakCrate(p) {
   burst(p.mesh.position.clone(), 0.04);
   const x = p.mesh.position.x, z = p.mesh.position.z;
-  board.remove(p.mesh);
+  field.remove(p.mesh);
   const i = pickups.indexOf(p);
   if (i >= 0) pickups.splice(i, 1);
   collectPickup(p);
@@ -844,7 +913,7 @@ function burst(pos, size) {
       depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false }));
     m.position.copy(pos);
     m.scale.setScalar(size * (0.5 + Math.random() * 0.5));
-    board.add(m);
+    field.add(m);
     sparks.push({ mesh: m, vel: new THREE.Vector3().randomDirection().multiplyScalar(0.3 * size),
       born: performance.now(), life: 380, size });
   }
@@ -1032,8 +1101,8 @@ let lastError = null;
 const tmpV = new THREE.Vector3();
 
 function continueRun() {
-  for (const e of enemies) board.remove(e.mesh);
-  for (const b of bullets) board.remove(b.mesh);
+  for (const e of enemies) field.remove(e.mesh);
+  for (const b of bullets) field.remove(b.mesh);
   enemies.length = 0; bullets.length = 0; crateRefills.length = 0;
   while (pickups.length < CRATES_TARGET) spawnPickup();
   S.hp = S.maxHp; S.score = Math.floor(S.score / 2); S.continues = (S.continues || 0) + 1;
@@ -1045,18 +1114,19 @@ function continueRun() {
 }
 function startRun() {
   // clear the board
-  for (const e of enemies) board.remove(e.mesh);
-  for (const g of gems) board.remove(g.mesh);
-  for (const b of bullets) board.remove(b.mesh);
-  for (const s of sparks) board.remove(s.mesh);
+  for (const e of enemies) field.remove(e.mesh);
+  for (const g of gems) field.remove(g.mesh);
+  for (const b of bullets) field.remove(b.mesh);
+  for (const s of sparks) field.remove(s.mesh);
   enemies.length = 0; gems.length = 0; bullets.length = 0; sparks.length = 0;
   // reset the run
   S.state = 'play'; S.score = 0; S.kills = 0; S.level = 1; S.xp = 0; S.xpNeed = 6;
   S.maxHp = 10; S.hp = 10; S.eraIndex = 0; S.eraTimer = 0; S.time = 0; S.xpNeed = 28;
-  for (const m of mines) board.remove(m.mesh);
-  for (const p of pickups) board.remove(p.mesh);
+  for (const m of mines) field.remove(m.mesh);
+  for (const p of pickups) field.remove(p.mesh);
   mines.length = 0; pickups.length = 0; crateRefills.length = 0;
   for (let i = 0; i < CRATES_TARGET; i++) spawnPickup();   // two crates, and no more
+  seedClouds();
   S.fireRate = 2.6; S.damage = 1; S.bulletSpeed = 4.2; S.wingmen = 0; S.pierce = 0; S.magnet = 0.35;
   S.sideGuns = 0; S.rearGun = 0; S.mines = 0; S.shield = 0; S.speedBonus = 0;
   S.ringShots = 0; S.ringTimer = 0; S.homing = 0; S.weaponName = 'SINGLE GUN';
@@ -1111,7 +1181,7 @@ const vrPanel = new THREE.Mesh(new THREE.PlaneGeometry(1.0, 0.5),
 vrPanel.renderOrder = 10;
 vrPanel.position.set(0, 0.45, -0.2);
 vrPanel.rotation.x = -0.25;
-board.add(vrPanel);
+board.add(vrPanel);           // stage, so it sits still
 function vrShow(lines) {
   const c = vctx;
   c.clearRect(0, 0, 1024, 512);
@@ -1164,7 +1234,7 @@ const hud = new THREE.Mesh(new THREE.PlaneGeometry(0.62, 0.31),
   new THREE.MeshBasicMaterial({ map: hudTex, transparent: true, depthTest: false }));
 hud.position.set(0, 0.42, -ARENA - 0.28);
 hud.rotation.x = -0.35;
-board.add(hud);
+board.add(hud);            // stage, so it sits still
 const perf = { frames: 0, last: performance.now(), fps: 0, msAvg: 0, samples: [] };
 const HUD_W = 512, HUD_H = 256, PAD = 20;
 // Fit a line of text inside a given width by shrinking the type until it fits.
@@ -1240,11 +1310,11 @@ renderer.xr.addEventListener('sessionstart', () => { boardPlacedFrames = 0; });
 renderer.xr.addEventListener('sessionend', () => { board.position.set(0, BOARD_Y, -0.95); });
 // every frame after placement, the board's place in the world is its home MINUS the
 // distance it has been carried, which is what puts the plane back in front of you
-function holdBoardUnderPlayer() {
-  if (!renderer.xr.isPresenting) return;
-  if (boardPlacedFrames <= 30 && boardPlacedFrames > 0) boardHome.copy(board.position);
-  board.position.x = boardHome.x - cam.x;
-  board.position.z = boardHome.z - cam.z;
+let lastCamX = 0, lastCamZ = 0;
+function holdBoardUnderPlayer(clampDt) {
+  // the clouds shift by how far the field was carried this frame
+  if (renderer.xr.isPresenting) driftClouds(clampDt, cam.x - lastCamX, cam.z - lastCamZ);
+  lastCamX = cam.x; lastCamZ = cam.z;
 }
 // Vampire-Survivors style: the plane flies freely inside a frame a good deal
 // larger than the board, and the board only slides when the plane reaches the
@@ -1252,7 +1322,11 @@ function holdBoardUnderPlayer() {
 // The field scrolls: the plane never hits a wall. The board is carried along beneath
 // the plane, keeping it inside a window centred on the board. The window is a good deal
 // smaller than the board, so you reach the border long before the board runs out.
-const WINDOW_X = 0.62, WINDOW_Z = 0.42;    // half-size of the visible window
+// The boundary stands still in front of you and the field runs on beneath it. The plane
+// is stopped at the boundary; the field is pushed past it, so the grass keeps streaming
+// while the frame stays put.
+const BOUND_X = 0.86, BOUND_Z = 0.50;      // half-size of the static boundary
+const WINDOW_X = BOUND_X, WINDOW_Z = BOUND_Z;
 const cam = { x: 0, z: 0 };                // how far the board has been carried
 const boardHome = new THREE.Vector3();     // where the board sits under your head
 function applyZoom() {
@@ -1266,8 +1340,9 @@ function applyZoom() {
   if (pz > WINDOW_Z) dz = pz - WINDOW_Z;
   else if (pz < -WINDOW_Z) dz = pz + WINDOW_Z;
   cam.x += dx; cam.z += dz;
-  board.position.x -= dx;
-  board.position.z -= dz;
+  // only the field is carried; the board — and so the boundary — is never moved
+  field.position.x -= dx;
+  field.position.z -= dz;
 }
 // the bank angle reads the field's motion, so the plane leans into a push
 function framePush() {
@@ -1309,7 +1384,7 @@ function gameFrame() {
 
   placeBoardForHead();
   applyZoom();
-  holdBoardUnderPlayer();
+  holdBoardUnderPlayer(dt);
   // Y button (left controller, upper face button) quits to the title screen
   for (const c of controllers) {
     const gp = c.userData.gp;
@@ -1326,7 +1401,9 @@ function gameFrame() {
     const speed = 0.62 * (1 + (S.speedBonus || 0));                       // metres per second on the board
     player.position.x += inp.x * speed * dt;
     player.position.z += inp.z * speed * dt;
-    // no wall and no clamp: the plane flies free, and the board is carried with it
+    // the plane travels until it meets the boundary, which does not move
+    player.position.x = Math.max(-BOUND_X, Math.min(BOUND_X, player.position.x));
+    player.position.z = Math.max(-BOUND_Z, Math.min(BOUND_Z, player.position.z));
     // the plane faces the way it moves; when still, it keeps its last heading
     if (Math.abs(inp.x) + Math.abs(inp.z) > 0.05) {
       const want = Math.atan2(inp.x, inp.z) + Math.PI;
@@ -1394,7 +1471,7 @@ function gameFrame() {
     }
     b.mesh.position.addScaledVector(b.dir, S.bulletSpeed * dt);
     const out = Math.abs(b.mesh.position.x) > ARENA_X + 0.1 || Math.abs(b.mesh.position.z) > ARENA + 0.1;
-    if (b.life <= 0 || out) { board.remove(b.mesh); bullets.splice(i, 1); continue; }
+    if (b.life <= 0 || out) { field.remove(b.mesh); bullets.splice(i, 1); continue; }
     // hit test: planes and crates both stop a bullet
     let spent = false;
     for (let q = pickups.length - 1; q >= 0; q--) {
@@ -1402,7 +1479,7 @@ function gameFrame() {
       if (b.mesh.position.distanceTo(p.mesh.position) < 0.048) {
         p.hp -= S.damage;
         if (p.hp <= 0) breakCrate(p); else burst(b.mesh.position.clone(), 0.02);
-        board.remove(b.mesh); bullets.splice(i, 1);
+        field.remove(b.mesh); bullets.splice(i, 1);
         spent = true;
         break;
       }
@@ -1415,11 +1492,11 @@ function gameFrame() {
         if (e.hp <= 0) {
           burst(e.mesh.position.clone(), e.kind && e.kind.name === 'BOMBER' ? 0.09 : 0.05);
           for (let g = 0; g < (e.gem || 1); g++) dropGem(e.mesh.position.clone());
-          board.remove(e.mesh); enemies.splice(k, 1);
+          field.remove(e.mesh); enemies.splice(k, 1);
           S.kills++; S.score += (e.bounty || 10);
         } else {
           b.hits++;
-          if (b.hits > S.pierce) { board.remove(b.mesh); bullets.splice(i, 1); }
+          if (b.hits > S.pierce) { field.remove(b.mesh); bullets.splice(i, 1); }
         }
         break;
       }
@@ -1454,7 +1531,7 @@ function gameFrame() {
     // reach the player
     if (d < 0.055) {
       if (!player.userData.grace || now > player.userData.grace) damagePlayer();
-      board.remove(e.mesh); enemies.splice(i, 1);
+      field.remove(e.mesh); enemies.splice(i, 1);
       continue;
     }
   }
@@ -1462,14 +1539,14 @@ function gameFrame() {
   // --- mines: rest, then burst when a plane comes near ---
   for (let i = mines.length - 1; i >= 0; i--) {
     const m = mines[i];
-    if (now - m.born > m.life) { board.remove(m.mesh); mines.splice(i, 1); continue; }
+    if (now - m.born > m.life) { field.remove(m.mesh); mines.splice(i, 1); continue; }
     m.mesh.material.opacity = 0.55 + Math.sin(now / 140) * 0.35;
     for (let k = enemies.length - 1; k >= 0; k--) {
       const e = enemies[k];
       if (e.mesh.position.distanceTo(m.mesh.position) < 0.075) {
         burst(m.mesh.position.clone(), 0.05);
-        board.remove(m.mesh); mines.splice(i, 1);
-        board.remove(e.mesh);
+        field.remove(m.mesh); mines.splice(i, 1);
+        field.remove(e.mesh);
         if (e.hp - S.damage <= 0) {
           for (let g = 0; g < (e.gem || 1); g++) dropGem(e.mesh.position.clone());
           S.kills++; S.score += (e.bounty || 10);
@@ -1499,7 +1576,7 @@ function gameFrame() {
       g.mesh.position.addScaledVector(tmpV, 0.9 * dt);
     }
     if (d < 0.04) {
-      board.remove(g.mesh); gems.splice(i, 1);
+      field.remove(g.mesh); gems.splice(i, 1);
       S.xp++;
       if (S.xp >= S.xpNeed) {
         S.xp = 0; S.xpNeed = Math.floor(S.xpNeed * 1.7) + 8;
@@ -1517,7 +1594,7 @@ function gameFrame() {
   for (let i = sparks.length - 1; i >= 0; i--) {
     const s = sparks[i];
     const age = (now - s.born) / 1000;
-    if (age > s.life / 1000) { board.remove(s.mesh); sparks.splice(i, 1); continue; }
+    if (age > s.life / 1000) { field.remove(s.mesh); sparks.splice(i, 1); continue; }
     s.mesh.position.addScaledVector(s.vel, dt);
     s.mesh.material.opacity = 1 - age / (s.life / 1000);
     s.mesh.scale.setScalar(s.size * (0.6 + age * 2.5));
