@@ -431,7 +431,7 @@ const S = {
 
 const player = new THREE.Group();
 board.add(player);
-let playerMesh = makeAircraft('futuristic', 0x8fd0ff, 0.055);
+let playerMesh = makeAircraft('futuristic', 0x8fd0ff, 0.034);
 player.add(playerMesh);
 // a soft glow under the player, so you never lose it in a swarm
 const glowTex = (() => {
@@ -471,10 +471,17 @@ const enemyMats = [
   new THREE.MeshStandardMaterial({ color: 0xd35400, roughness: 0.6 }),
   new THREE.MeshStandardMaterial({ color: 0x8e44ad, roughness: 0.6 }),
 ];
-function makeSwarmEnemy(mat) {
+const enemyTemplates = {};
+function makeSwarmEnemy() {
+  const e = era();
+  if (!enemyTemplates[e.year]) {
+    const shape = e.shape === 'futuristic' ? 'saucer' : e.shape;
+    enemyTemplates[e.year] = makeAircraft(shape, e.color, 0.026);
+  }
   const g = new THREE.Group();
-  g.add(new THREE.Mesh(enemyGeoBody, mat));
-  g.add(new THREE.Mesh(enemyGeoWing, mat));
+  const m = enemyTemplates[e.year].clone();
+  m.rotation.y = Math.PI;          // nose toward the direction of travel
+  g.add(m);
   return g;
 }
 const enemies = [];
@@ -491,7 +498,7 @@ function spawnEnemy() {
   else if (edge === 2) { x = -(ARENA + 0.12); z = t; }
   else { x = ARENA + 0.12; z = t; }
   const mat = enemyMats[S.eraIndex % enemyMats.length];
-  const mesh = makeSwarmEnemy(mat);
+  const mesh = makeSwarmEnemy();
   mesh.position.set(x, 0.045, z);
   board.add(mesh);
   const hp = 1 + Math.floor(S.level / 4);
@@ -506,7 +513,8 @@ function fire() {
   const streams = 1 + S.wingmen;
   for (let i = 0; i < streams; i++) {
     const spread = (i - (streams - 1) / 2) * 0.22;
-    const dir = new THREE.Vector3(Math.sin(spread), 0, -Math.cos(spread));
+    const a = player.rotation.y + spread;
+    const dir = new THREE.Vector3(-Math.sin(a), 0, -Math.cos(a));
     const b = new THREE.Mesh(bulletGeo, bulletMat);
     b.position.copy(player.position).setY(0.05).addScaledVector(dir, 0.04);
     board.add(b);
