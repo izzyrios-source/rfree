@@ -1290,6 +1290,14 @@ function drawHUD() {
   c.fillText(pct + '%', HUD_W - PAD, y + 18);
   c.textAlign = 'left';
 
+  // diagnostic line, shown while the two shoulder buttons are held
+  if (DIAG.shown) {
+    const d = 'cam ' + cam.x.toFixed(2) + ',' + cam.z.toFixed(2) +
+              '  field ' + field.position.x.toFixed(2) + ',' + field.position.z.toFixed(2) +
+              '  plane ' + player.position.x.toFixed(2) + ',' + player.position.z.toFixed(2);
+    c.fillStyle = '#ffb0b0'; fitFont(d, 18, INNER);
+    c.fillText(d, PAD, HUD_H - 34);
+  }
   // the bottom line carries two readings, each fitted into its own half
   const left = perf.fps + ' FPS  ' + perf.msAvg.toFixed(1) + ' ms';
   const right = 'MUSIC ' + (musicMuted ? 'OFF' : 'ON') + '  M';
@@ -1329,27 +1337,27 @@ const BOUND_X = 0.86, BOUND_Z = 0.50;      // the plane is kept inside the visib
 const WINDOW_X = 0.0, WINDOW_Z = 0.0;      // VS-style: the field is centred on the plane
 const cam = { x: 0, z: 0 };                // how far the board has been carried
 const boardHome = new THREE.Vector3();     // where the board sits under your head
+const DIAG = { dx: 0, dz: 0, runs: 0, shown: false };
 function applyZoom() {
   const z = board.userData.zoom || 1;
   board.scale.setScalar(z);
-  const px = player.position.x * z, pz = player.position.z * z;
-  // push the board only once the plane passes the window's edge
-  let dx = 0, dz = 0;
-  if (px > WINDOW_X) dx = px - WINDOW_X;
-  else if (px < -WINDOW_X) dx = px + WINDOW_X;
-  if (pz > WINDOW_Z) dz = pz - WINDOW_Z;
-  else if (pz < -WINDOW_Z) dz = pz + WINDOW_Z;
+  // Move the field by exactly what the plane moved this frame, and the plane by nothing.
+  // One distance, applied to the field alone: the plane holds station in front of you and
+  // the world runs past it, which is the Vampire Survivors arrangement.
+  const dx = player.position.x, dz = player.position.z;
+  DIAG.dx = dx; DIAG.dz = dz; DIAG.runs++;
   cam.x += dx; cam.z += dz;
-  // only the field is carried; the board — and so the boundary — is never moved
   field.position.x -= dx;
   field.position.z -= dz;
+  // the plane's own x/z go back to the centre: the field's new position IS its new place
+  player.position.x = 0;
+  player.position.z = 0;
 }
 // the bank angle reads the field's motion, so the plane leans into a push
 function framePush() {
-  const z = board.userData.zoom || 1;
-  const px = player.position.x * z, pz = player.position.z * z;
-  return { x: px > WINDOW_X ? px - WINDOW_X : px < -WINDOW_X ? px + WINDOW_X : 0,
-           z: pz > WINDOW_Z ? pz - WINDOW_Z : pz < -WINDOW_Z ? pz + WINDOW_Z : 0 };
+  // the plane is pinned to the middle, so the field's speed is what tells the plane
+  // how hard it is being pushed
+  return { x: 0, z: 0 };
 }
 function placeBoardForHead() {
   if (!renderer.xr.isPresenting) return;
@@ -1382,6 +1390,17 @@ function gameFrame() {
 
   const now = performance.now();
 
+  // diagnostic toggle: A+X on a keyboard, or grip on either controller
+  DIAG.shown = !!(keys.KeyA && keys.KeyX);
+  for (const c of controllers) {
+    const gp = c.userData.gp;
+    if (gp && gp.buttons) {
+      for (let b = 0; b < gp.buttons.length; b++) {
+        const btn = gp.buttons[b];
+        if (btn && b === 1 && btn.pressed) DIAG.shown = true;
+      }
+    }
+  }
   placeBoardForHead();
   applyZoom();
   holdBoardUnderPlayer(dt);
@@ -1401,10 +1420,8 @@ function gameFrame() {
     const speed = 0.62 * (1 + (S.speedBonus || 0));                       // metres per second on the board
     player.position.x += inp.x * speed * dt;
     player.position.z += inp.z * speed * dt;
-    // The plane is kept just inside the tray's visible edge — not to block it, but so it
-    // cannot slide off the field. The field's carry below is what actually moves the world.
-    player.position.x = Math.max(-BOUND_X + 0.05, Math.min(BOUND_X - 0.05, player.position.x));
-    player.position.z = Math.max(-BOUND_Z + 0.05, Math.min(BOUND_Z - 0.05, player.position.z));
+    // No clip and no wall. applyZoom pins the plane back onto the field's centre each
+    // frame, so the plane holds station while the field runs past underneath it.
     // the plane faces the way it moves; when still, it keeps its last heading
     if (Math.abs(inp.x) + Math.abs(inp.z) > 0.05) {
       const want = Math.atan2(inp.x, inp.z) + Math.PI;
