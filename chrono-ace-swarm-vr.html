@@ -18,7 +18,7 @@
 <div id="help">
 <b>CHRONO ACE: SWARM</b><br>
 VR: left stick = fly &middot; Desktop: WASD / arrows<br>
-Trigger/Space/click = start &middot; Guns fire themselves<br>Right trigger + right stick = zoom &middot; Y or Q = quit &middot; X = re-centre board<br>Game over: trigger/C = continue, grip/N = new game &middot; M music &middot; Q quit
+Trigger/Space/click = start &middot; Guns fire themselves<br>Either trigger + either stick = zoom &middot; Y or Q = quit &middot; X = re-centre board<br>Game over: trigger/C = continue, grip/N = new game &middot; M music &middot; Q quit
 </div>
 <script type="module">
 
@@ -104,11 +104,55 @@ const grassTex = (() => {
     x.lineWidth = 1;
     x.beginPath(); x.moveTo(px, py); x.lineTo(px + (Math.random() - 0.5) * 2, py - l); x.stroke();
   }
+  // ---- HILLS: soft dark-to-light shading, as though low sun rakes across them ----
+  for (let i = 0; i < 22; i++) {
+    const hx = Math.random() * 512, hy = Math.random() * 512;
+    const rx = 60 + Math.random() * 120, ry = 40 + Math.random() * 80;
+    // the lit face of the hill
+    let g = x.createRadialGradient(hx, hy, 0, hx, hy, Math.max(rx, ry));
+    g.addColorStop(0, 'rgba(150,190,95,0.5)');
+    g.addColorStop(0.55, 'rgba(110,160,70,0.3)');
+    g.addColorStop(1, 'rgba(90,140,60,0)');
+    x.save(); x.translate(hx, hy); x.scale(1, ry / rx); x.translate(-hx, -hy);
+    x.fillStyle = g; x.beginPath(); x.arc(hx, hy, rx, 0, Math.PI * 2); x.fill();
+    x.restore();
+    // its shadowed side, offset down-right
+    g = x.createRadialGradient(hx + rx * 0.3, hy + ry * 0.35, 0, hx + rx * 0.3, hy + ry * 0.35, Math.max(rx, ry) * 0.9);
+    g.addColorStop(0, 'rgba(22,48,20,0.4)');
+    g.addColorStop(1, 'rgba(22,48,20,0)');
+    x.save(); x.translate(hx + rx * 0.3, hy + ry * 0.35); x.scale(1, ry / rx); x.translate(-(hx + rx * 0.3), -(hy + ry * 0.35));
+    x.fillStyle = g; x.beginPath(); x.arc(hx + rx * 0.3, hy + ry * 0.35, rx * 0.9, 0, Math.PI * 2); x.fill();
+    x.restore();
+    // a ridge line along the top of the hill
+    x.strokeStyle = 'rgba(190,215,130,0.35)'; x.lineWidth = 2 + Math.random() * 2;
+    x.beginPath();
+    for (let k = 0; k <= 12; k++) {
+      const a = Math.PI * (1.08 + k / 12 * 0.84);
+      const px2 = hx + Math.cos(a) * rx, py2 = hy - Math.sin(a) * ry;
+      k ? x.lineTo(px2, py2) : x.moveTo(px2, py2);
+    }
+    x.stroke();
+  }
+  // ---- a few field tracks worn across the hills ----
+  for (let i = 0; i < 6; i++) {
+    x.strokeStyle = 'rgba(150,130,85,0.25)'; x.lineWidth = 3 + Math.random() * 4;
+    x.beginPath();
+    let px3 = Math.random() * 512, py3 = Math.random() * 512;
+    x.moveTo(px3, py3);
+    for (let k = 0; k < 6; k++) {
+      px3 += (Math.random() - 0.5) * 160; py3 += (Math.random() - 0.5) * 160;
+      x.quadraticCurveTo(px3 + (Math.random() - 0.5) * 80, py3 + (Math.random() - 0.5) * 80, px3, py3);
+    }
+    x.stroke();
+  }
+  // ---- a light vignette, so the field reads as a real surface under a sky ----
+  const vg = x.createRadialGradient(256, 256, 90, 256, 256, 330);
+  vg.addColorStop(0, 'rgba(255,255,220,0.10)');
+  vg.addColorStop(1, 'rgba(10,30,15,0.30)');
+  x.fillStyle = vg; x.fillRect(0, 0, 512, 512);
   const t = new THREE.CanvasTexture(c);
   t.colorSpace = THREE.SRGBColorSpace;
-  t.wrapS = t.wrapT = THREE.RepeatWrapping;
-  t.repeat.set(ARENA_X * 2, ARENA * 2);
-  t.anisotropy = 4;
+  t.anisotropy = 8;
   return t;
 })();
 const grass = new THREE.Mesh(new THREE.PlaneGeometry(ARENA_X * 2, ARENA * 2),
@@ -634,15 +678,70 @@ for (const p of PICKUPS) {
   iconTex[p.id] = t;
 }
 const pickups = [];
-function spawnPickup() {
+const crateRefills = [];          // {x, z, due} for crates waiting on their minute
+const crateGeo = new THREE.BoxGeometry(0.05, 0.038, 0.05);
+// Every crate looks the same: planked wood, no letter, no colour, no hint of its contents.
+const crateLidTex = (() => {
+  const c = document.createElement('canvas'); c.width = c.height = 64;
+  const x = c.getContext('2d');
+  x.fillStyle = '#6b5232'; x.fillRect(0, 0, 64, 64);
+  for (let i = 0; i < 90; i++) {                       // grain
+    x.strokeStyle = 'rgba(60,44,26,' + (0.15 + Math.random() * 0.3) + ')';
+    x.lineWidth = 1;
+    const py = Math.random() * 64;
+    x.beginPath(); x.moveTo(0, py); x.lineTo(64, py + (Math.random() - 0.5) * 4); x.stroke();
+  }
+  x.strokeStyle = '#4a3a24'; x.lineWidth = 3;          // planks
+  for (let i = 8; i < 64; i += 14) { x.beginPath(); x.moveTo(0, i); x.lineTo(64, i); x.stroke(); }
+  x.strokeStyle = '#8a6f45'; x.lineWidth = 4;          // an iron band around the lid
+  x.strokeRect(5, 5, 54, 54);
+  x.fillStyle = '#3d2f1c';                              // nail heads
+  for (const [nx, ny] of [[12, 12], [52, 12], [12, 52], [52, 52]]) {
+    x.beginPath(); x.arc(nx, ny, 2.5, 0, Math.PI * 2); x.fill();
+  }
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+})();
+const crateSideMat = new THREE.MeshStandardMaterial({ color: 0x6b5232, roughness: 0.95, metalness: 0.05 });
+const CRATES_TARGET = 7;        // the field carries this many, and refills to it
+function spawnCrateAt(x, z) {
+  const g = new THREE.Group();
+  g.add(new THREE.Mesh(crateGeo, crateSideMat));
+  const lid = new THREE.Mesh(new THREE.PlaneGeometry(0.05, 0.05),
+    new THREE.MeshBasicMaterial({ map: crateLidTex, toneMapped: false }));
+  lid.rotation.x = -Math.PI / 2;
+  lid.position.y = 0.020;
+  g.add(lid);
+  g.position.set(x, 0.019, z);
+  board.add(g);
+  // contents are rolled at random when the crate is made, never shown until it breaks
   const def = PICKUPS[Math.floor(Math.random() * PICKUPS.length)];
-  const m = new THREE.Sprite(new THREE.SpriteMaterial({ map: iconTex[def.id],
-    transparent: true, depthWrite: false, toneMapped: false }));
-  m.scale.set(0.055, 0.055, 1);
-  m.position.set((Math.random() * 2 - 1) * (ARENA_X - 0.25), 0.06,
-                 (Math.random() * 2 - 1) * (ARENA - 0.25));
-  board.add(m);
-  pickups.push({ mesh: m, id: def.id, born: performance.now() });
+  pickups.push({ mesh: g, id: def.id, hp: 1 });
+}
+function spawnPickup() {
+  // a spot, checked so two crates never share a place
+  for (let tries = 0; tries < 24; tries++) {
+    const x = (Math.random() * 2 - 1) * (ARENA_X - 0.25);
+    const z = (Math.random() * 2 - 1) * (ARENA - 0.25);
+    let clash = false;
+    for (const p of pickups) {
+      if (Math.hypot(p.mesh.position.x - x, p.mesh.position.z - z) < 0.22) { clash = true; break; }
+    }
+    if (clash) continue;
+    spawnCrateAt(x, z);
+    return;
+  }
+}
+function breakCrate(p) {
+  burst(p.mesh.position.clone(), 0.04);
+  const x = p.mesh.position.x, z = p.mesh.position.z;
+  board.remove(p.mesh);
+  const i = pickups.indexOf(p);
+  if (i >= 0) pickups.splice(i, 1);
+  collectPickup(p);
+  sfxBoom(p.mesh.position, 0.4);
+  // a fresh crate turns up in the same spot a minute later
+  crateRefills.push({ x, z, due: performance.now() + 60000 });
 }
 function collectPickup(p) {
   if (p.id === 'health') { S.hp = Math.min(S.maxHp, S.hp + 4); showBanner('+40% HULL', 1.2); }
@@ -711,20 +810,37 @@ const controllers = [0, 1].map(i => {
   return c;
 });
 function stickInput() {
-  // right trigger held + right stick = zoom the playfield in and out
-  let zoom = 0;
+  // ZOOM. Hold either trigger and push either thumbstick up or down.
+  // Quest 2/3 put a stick's Y on axis 3 and its X on axis 2; older runtimes put
+  // them on 1 and 0. Read the axis pair that is actually alive, and take the
+  // trigger's own `pressed` flag as well as its value, since that is what varies
+  // between runtimes.
+  let zoomAxis = 0, zoomHeld = false;
   for (const c of controllers) {
     const gp = c.userData.gp;
-    if (!gp || !gp.axes) continue;
-    const trig = gp.buttons && gp.buttons[0] ? gp.buttons[0].value : 0;
-    if (trig > 0.5 && gp.axes.length >= 4) zoom += gp.axes[3];
+    if (!gp) continue;
+    if (gp.buttons) {
+      for (let b = 0; b < gp.buttons.length; b++) {
+        const btn = gp.buttons[b];
+        if (!btn) continue;
+        if (b === 0 && ((btn.pressed) || (btn.value || 0) > 0.5)) zoomHeld = true;
+      }
+    }
+    if (!gp.axes || !gp.axes.length) continue;
+    const a = gp.axes;
+    const yPair = a.length >= 4 ? a[3] : a[1];
+    const xPair = a.length >= 4 ? a[2] : a[0];
+    const y = yPair || xPair;               // whichever axis the stick is on
+    if (Math.abs(y) > 0.15) zoomAxis = y;
   }
-  if (Math.abs(zoom) > 0.1) {
-    board.userData.zoom = Math.max(0.6, Math.min(2.2, (board.userData.zoom || 1) + zoom * 0.9 * clock.getDelta()));
+  if (zoomHeld && zoomAxis) {
+    board.userData.zoom = Math.max(0.6, Math.min(2.2,
+      (board.userData.zoom || 1) + zoomAxis * 1.1 * clock.getDelta()));
   }
-  // keyboard fallback: Z and X
-  if (keys.KeyZ) board.userData.zoom = Math.min(2.2, (board.userData.zoom || 1) + 0.8 * clock.getDelta());
-  if (keys.KeyX) board.userData.zoom = Math.max(0.6, (board.userData.zoom || 1) - 0.8 * clock.getDelta());
+  // keyboard fallback: Z and X, and 0 resets
+  if (keys.KeyZ) board.userData.zoom = Math.min(2.2, (board.userData.zoom || 1) + 0.9 * clock.getDelta());
+  if (keys.KeyX) board.userData.zoom = Math.max(0.6, (board.userData.zoom || 1) - 0.9 * clock.getDelta());
+  if (keys.Digit0) board.userData.zoom = 1;
   let x = 0, z = 0;
   if (keys.KeyA || keys.ArrowLeft) x -= 1;
   if (keys.KeyD || keys.ArrowRight) x += 1;
@@ -843,7 +959,8 @@ const tmpV = new THREE.Vector3();
 function continueRun() {
   for (const e of enemies) board.remove(e.mesh);
   for (const b of bullets) board.remove(b.mesh);
-  enemies.length = 0; bullets.length = 0;
+  enemies.length = 0; bullets.length = 0; crateRefills.length = 0;
+  while (pickups.length < CRATES_TARGET) spawnPickup();
   S.hp = S.maxHp; S.score = Math.floor(S.score / 2); S.continues = (S.continues || 0) + 1;
   S.state = 'play';
   player.userData.grace = performance.now() + 2000;
@@ -863,7 +980,8 @@ function startRun() {
   S.maxHp = 10; S.hp = 10; S.eraIndex = 0; S.eraTimer = 0; S.time = 0; S.xpNeed = 28;
   for (const m of mines) board.remove(m.mesh);
   for (const p of pickups) board.remove(p.mesh);
-  mines.length = 0; pickups.length = 0;
+  mines.length = 0; pickups.length = 0; crateRefills.length = 0;
+  for (let i = 0; i < CRATES_TARGET; i++) spawnPickup();   // stock the field
   S.fireRate = 2.6; S.damage = 1; S.bulletSpeed = 4.2; S.wingmen = 0; S.pierce = 0; S.magnet = 0.35;
   S.sideGuns = 0; S.rearGun = 0; S.mines = 0; S.shield = 0; S.speedBonus = 0;
   S.ringShots = 0; S.ringTimer = 0; S.homing = 0; S.weaponName = 'SINGLE GUN';
@@ -997,9 +1115,32 @@ let boardPlacedFrames = 0;
 const headPos = new THREE.Vector3();
 renderer.xr.addEventListener('sessionstart', () => { boardPlacedFrames = 0; });
 renderer.xr.addEventListener('sessionend', () => { board.position.set(0, BOARD_Y, -0.95); });
+// Vampire-Survivors style: the plane flies freely inside a frame a good deal
+// larger than the board, and the board only slides when the plane reaches the
+// frame's edge. In the middle, the plane moves and the ground stays put.
+const FRAME_X = 1.15, FRAME_Z = 0.62;      // how far the plane may roam from centre
+const cam = { x: 0, z: 0 };
 function applyZoom() {
   const z = board.userData.zoom || 1;
   board.scale.setScalar(z);
+  // where the plane is, relative to the board, in world metres
+  const px = player.position.x * z, pz = player.position.z * z;
+  // push the board the other way only once the plane passes the frame
+  let dx = 0, dz = 0;
+  if (px > FRAME_X) dx = px - FRAME_X;
+  else if (px < -FRAME_X) dx = px + FRAME_X;
+  if (pz > FRAME_Z) dz = pz - FRAME_Z;
+  else if (pz < -FRAME_Z) dz = pz + FRAME_Z;
+  cam.x += dx; cam.z += dz;
+  board.position.x -= dx;
+  board.position.z -= dz;
+}
+// the bank angle reads the field's motion, so the plane leans into a push
+function framePush() {
+  const z = board.userData.zoom || 1;
+  const px = player.position.x * z, pz = player.position.z * z;
+  return { x: px > FRAME_X ? px - FRAME_X : px < -FRAME_X ? px + FRAME_X : 0,
+           z: pz > FRAME_Z ? pz - FRAME_Z : pz < -FRAME_Z ? pz + FRAME_Z : 0 };
 }
 function placeBoardForHead() {
   if (!renderer.xr.isPresenting) return;
@@ -1049,9 +1190,9 @@ function gameFrame() {
     const speed = 0.62 * (1 + (S.speedBonus || 0));                       // metres per second on the board
     player.position.x += inp.x * speed * dt;
     player.position.z += inp.z * speed * dt;
-    const lim = ARENA - 0.05, limX = ARENA_X - 0.05;
-    player.position.x = Math.max(-limX, Math.min(limX, player.position.x));
-    player.position.z = Math.max(-lim, Math.min(lim, player.position.z));
+    // the plane roams a frame larger than the board; the board follows at the edges
+    player.position.x = Math.max(-FRAME_X, Math.min(FRAME_X, player.position.x));
+    player.position.z = Math.max(-FRAME_Z, Math.min(FRAME_Z, player.position.z));
     // the plane faces the way it moves; when still, it keeps its last heading
     if (Math.abs(inp.x) + Math.abs(inp.z) > 0.05) {
       const want = Math.atan2(inp.x, inp.z) + Math.PI;
@@ -1060,6 +1201,12 @@ function gameFrame() {
       while (d < -Math.PI) d += Math.PI * 2;
       player.rotation.y += Math.max(-6 * dt, Math.min(6 * dt, d));
     }
+    // bank into the turn: a roll follows the frame's push, plus the stick's turn
+    const push = framePush();
+    const bankFromPush = Math.max(-0.7, Math.min(0.7, push.x * 3.2));
+    const turnRate = inp.x * 0.45;
+    const wantRoll = -bankFromPush - turnRate;
+    player.rotation.z += (wantRoll - player.rotation.z) * Math.min(1, 5 * dt);
 
     // --- auto-fire ---
     fireTimer -= dt;
@@ -1091,7 +1238,10 @@ function gameFrame() {
   }
 
   // --- bullets ---
-  grassTex.offset.x = player.position.z * 0.5;   // the ground runs under the plane
+  // the painted ground slides only as far as the board has been pushed, so the
+  // hills and roads visibly run beneath you when you reach the frame edge
+  grassTex.offset.x = cam.z;
+  grassTex.offset.y = -cam.x;
   if (S.state !== 'play') { renderer.render(scene, camera); return; }
   for (let i = bullets.length - 1; i >= 0; i--) {
     const b = bullets[i];
@@ -1110,7 +1260,19 @@ function gameFrame() {
     b.mesh.position.addScaledVector(b.dir, S.bulletSpeed * dt);
     const out = Math.abs(b.mesh.position.x) > ARENA_X + 0.1 || Math.abs(b.mesh.position.z) > ARENA + 0.1;
     if (b.life <= 0 || out) { board.remove(b.mesh); bullets.splice(i, 1); continue; }
-    // hit test
+    // hit test: planes and crates both stop a bullet
+    let spent = false;
+    for (let q = pickups.length - 1; q >= 0; q--) {
+      const p = pickups[q];
+      if (b.mesh.position.distanceTo(p.mesh.position) < 0.048) {
+        p.hp -= S.damage;
+        if (p.hp <= 0) breakCrate(p); else burst(b.mesh.position.clone(), 0.02);
+        board.remove(b.mesh); bullets.splice(i, 1);
+        spent = true;
+        break;
+      }
+    }
+    if (spent) continue;
     for (let k = enemies.length - 1; k >= 0; k--) {
       const e = enemies[k];
       if (b.mesh.position.distanceTo(e.mesh.position) < 0.045) {
@@ -1167,20 +1329,12 @@ function gameFrame() {
     }
   }
 
-  // --- bonuses: drift a little, collect on touch ---
-  for (let i = pickups.length - 1; i >= 0; i--) {
-    const p = pickups[i];
-    const age = (now - p.born) / 1000;
-    p.mesh.position.y = 0.06 + Math.sin(now / 320 + i) * 0.012;
-    tmpV.copy(player.position).sub(p.mesh.position); tmpV.y = 0;
-    const dd = tmpV.length();
-    if (dd < S.magnet * 1.6 && dd > 0.0001) {
-      tmpV.divideScalar(dd);
-      p.mesh.position.addScaledVector(tmpV, 0.5 * dt);
-    }
-    if (age > 22 || dd < 0.05) {
-      if (dd < 0.05) { collectPickup(p); sfxWarp(); }
-      board.remove(p.mesh); pickups.splice(i, 1);
+  // --- crates: static, and they stay put until they are shot open ---
+  for (let i = crateRefills.length - 1; i >= 0; i--) {
+    const r = crateRefills[i];
+    if (now >= r.due) {                     // its minute is up: a new crate takes the spot
+      spawnCrateAt(r.x, r.z);
+      crateRefills.splice(i, 1);
     }
   }
 
